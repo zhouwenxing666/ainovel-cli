@@ -93,6 +93,9 @@ func LoadConfig() (Config, error) {
 		cfg = mergeConfig(cfg, project)
 	}
 
+	// 对合并后的有效配置统一补产品默认值。放在 overlay 之后可确保显式项目配置
+	// 始终优先，同时让旧版 Local Codex 配置无需手工迁移即可获得当前默认值。
+	cfg.FillDefaults()
 	return cfg, nil
 }
 
@@ -157,6 +160,9 @@ func mergeConfig(base, overlay Config) Config {
 		}
 		for k, v := range overlay.Providers {
 			existing := base.Providers[k]
+			// Driver/Command/CodexHome/SingleCallTimeout/WorkerTimeout are
+			// deliberately global-only. A repository-local config must not gain
+			// authority to choose an executable, auth directory, or process limit.
 			if v.Type != "" {
 				existing.Type = v.Type
 			}
@@ -177,6 +183,9 @@ func mergeConfig(base, overlay Config) Config {
 			}
 			if len(v.Extra) > 0 {
 				existing.Extra = cloneMap(v.Extra)
+			}
+			if v.StreamIdleTimeout != "" {
+				existing.StreamIdleTimeout = v.StreamIdleTimeout
 			}
 			base.Providers[k] = existing
 		}
@@ -200,6 +209,9 @@ func mergeConfig(base, overlay Config) Config {
 			}
 			if v.ReasoningEffort != "" {
 				existing.ReasoningEffort = v.ReasoningEffort
+			}
+			if v.Timeout != "" {
+				existing.Timeout = v.Timeout
 			}
 			base.Roles[k] = existing
 		}
@@ -244,6 +256,36 @@ func CloneConfig(cfg Config) Config {
 	}
 	clone.Notify.Events = append([]string(nil), cfg.Notify.Events...)
 	return clone
+}
+
+// ProjectSafeConfig strips fields that are authorized only by the global
+// config. The resulting provider overlays can still select models, but cannot
+// choose a local executable, auth directory, or provider-level process limit.
+func ProjectSafeConfig(cfg Config) Config {
+	safe := CloneConfig(cfg)
+	for name, provider := range safe.Providers {
+		provider.Driver = ""
+		provider.Command = ""
+		provider.CodexHome = ""
+		provider.SingleCallTimeout = ""
+		provider.WorkerTimeout = ""
+		safe.Providers[name] = provider
+	}
+	return safe
+}
+
+// SaveEffectiveConfig preserves the global-only process trust boundary when
+// the active editable layer is a project config.
+func SaveEffectiveConfig(path string, cfg Config) error {
+	global := DefaultConfigPath()
+	pathAbs, pathErr := filepath.Abs(path)
+	globalAbs, globalErr := filepath.Abs(global)
+	// Only the positively identified global file receives process authority.
+	// Resolution failures fail closed and produce a project-safe document.
+	if global == "" || pathErr != nil || globalErr != nil || filepath.Clean(pathAbs) != filepath.Clean(globalAbs) {
+		cfg = ProjectSafeConfig(cfg)
+	}
+	return SaveConfig(path, cfg)
 }
 
 // SaveProviderConfig 补丁式更新目标配置层里单个 provider 的凭证与模型库。

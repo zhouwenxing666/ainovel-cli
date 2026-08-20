@@ -12,7 +12,7 @@ func StartsForwardChapter(inst *Instruction, progress *domain.Progress, pending 
 	if inst == nil || inst.Agent != "writer" || progress == nil || progress.Phase != domain.PhaseWriting {
 		return false
 	}
-	if pending != nil || len(progress.PendingRewrites) > 0 || progress.InProgressChapter > 0 {
+	if pending != nil || progress.PendingReviewChapter > 0 || len(progress.PendingRewrites) > 0 || progress.InProgressChapter > 0 {
 		return false
 	}
 	target := inst.Chapter
@@ -51,9 +51,12 @@ func ResolveAdvanceHold(hold *domain.AdvanceHold, progress *domain.Progress) (Ad
 	}
 	switch hold.After {
 	case domain.AdvanceHoldAtBoundary:
+		if progress.PendingReviewChapter > 0 {
+			return AdvanceHoldKeep, nil
+		}
 		return AdvanceHoldConsumeAndStop, nil
 	case domain.AdvanceHoldAfterRewritesDrained:
-		if len(progress.PendingRewrites) > 0 {
+		if len(progress.PendingRewrites) > 0 || progress.PendingReviewChapter > 0 {
 			return AdvanceHoldKeep, nil
 		}
 		return AdvanceHoldConsumeAndStop, nil

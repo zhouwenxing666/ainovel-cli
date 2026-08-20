@@ -8,7 +8,8 @@
 # 指定版本：AINOVEL_VERSION=v1.2.3 curl -fsSL ... | sh
 set -e
 
-REPO="voocel/ainovel-cli"
+REPO="zhouwenxing666/ainovel-cli" # https://github.com/zhouwenxing666/ainovel-cli 是fork并修改的仓库，以这个仓库为准
+# REPO="voocel/ainovel-cli"
 BIN="ainovel-cli"
 DEST="${AINOVEL_INSTALL_DIR:-/usr/local/bin}"
 VERSION="${AINOVEL_VERSION:-${1:-latest}}"

@@ -41,10 +41,15 @@ type configProviderChoice struct {
 }
 
 type modelConfigBaseline struct {
-	providerType string
-	api          string
-	baseURL      string
-	models       []bootstrap.ModelConfig
+	driver        string
+	command       string
+	codexHome     string
+	singleTimeout string
+	workerTimeout string
+	providerType  string
+	api           string
+	baseURL       string
+	models        []bootstrap.ModelConfig
 }
 
 type modelConfigState struct {
@@ -60,6 +65,11 @@ type modelConfigState struct {
 	providerChoices []configProviderChoice // 一级菜单：编辑已有 Provider + “新增 Provider…”入口
 	presetChoices   []configProviderChoice // 二级菜单：可新增的内置/自定义 Provider 目录
 	provider        string
+	driver          string
+	command         string
+	codexHome       string
+	singleTimeout   string
+	workerTimeout   string
 	providerType    string
 	api             string
 	baseURL         string
@@ -128,6 +138,11 @@ func (s *modelConfigState) applyProviderChoice(choice configProviderChoice) {
 	if choice.existing != nil {
 		p := choice.existing
 		s.provider = p.Name
+		s.driver = p.Driver
+		s.command = p.Command
+		s.codexHome = p.CodexHome
+		s.singleTimeout = p.SingleCallTimeout
+		s.workerTimeout = p.WorkerTimeout
 		s.providerType = p.Type
 		s.api = p.API
 		s.baseURL = p.BaseURL
@@ -159,6 +174,11 @@ func (s *modelConfigState) applyProviderChoice(choice configProviderChoice) {
 	s.apiKey = ""
 	s.baseline = nil
 	s.api = ""
+	s.driver = ""
+	s.command = ""
+	s.codexHome = ""
+	s.singleTimeout = ""
+	s.workerTimeout = ""
 	s.models = nil
 	s.modelOrigins = nil
 	s.currentModel = "" // 新 provider 尚未被顶层选中
@@ -171,6 +191,16 @@ func (s *modelConfigState) applyProviderChoice(choice configProviderChoice) {
 		return
 	}
 	s.provider = choice.preset.Name
+	s.driver = choice.preset.Driver
+	if s.driver == "codex_cli" {
+		s.command = "codex"
+		s.singleTimeout = "3m"
+		s.workerTimeout = "30m"
+	}
+	if choice.preset.DefaultModel != "" {
+		s.models = []bootstrap.ModelConfig{{Name: choice.preset.DefaultModel}}
+		s.modelOrigins = []string{""}
+	}
 	s.providerType = "" // 内置 provider 协议由名称隐含
 	s.baseURL = choice.preset.BaseURL
 	s.apiKeyOptional = choice.preset.APIKeyOptional
@@ -179,6 +209,8 @@ func (s *modelConfigState) applyProviderChoice(choice configProviderChoice) {
 
 func (s *modelConfigState) captureBaseline() {
 	s.baseline = &modelConfigBaseline{
+		driver: s.driver, command: s.command, codexHome: s.codexHome,
+		singleTimeout: s.singleTimeout, workerTimeout: s.workerTimeout,
 		providerType: s.providerType,
 		api:          s.api,
 		baseURL:      s.baseURL,
@@ -200,7 +232,21 @@ func (s *modelConfigState) isDirty() bool {
 	if s.editingField == "key" && strings.TrimSpace(s.input.Value()) != "" {
 		return true
 	}
-	return s.providerType != s.baseline.providerType ||
+	command, codexHome := s.command, s.codexHome
+	singleTimeout, workerTimeout := s.singleTimeout, s.workerTimeout
+	switch s.editingField {
+	case "command":
+		command = strings.TrimSpace(s.input.Value())
+	case "codex_home":
+		codexHome = strings.TrimSpace(s.input.Value())
+	case "single_timeout":
+		singleTimeout = strings.TrimSpace(s.input.Value())
+	case "worker_timeout":
+		workerTimeout = strings.TrimSpace(s.input.Value())
+	}
+	return s.driver != s.baseline.driver || command != s.baseline.command ||
+		codexHome != s.baseline.codexHome || singleTimeout != s.baseline.singleTimeout ||
+		workerTimeout != s.baseline.workerTimeout || s.providerType != s.baseline.providerType ||
 		s.api != s.baseline.api ||
 		baseURL != s.baseline.baseURL ||
 		!slices.Equal(s.models, s.baseline.models)
@@ -216,6 +262,20 @@ type hubField struct {
 // hubFields 按当前 Provider 组装详情项：协议仅在显式指定时出现，Endpoint 仅 OpenAI 协议出现。
 func (s *modelConfigState) hubFields() []hubField {
 	var fields []hubField
+	if s.driver == "codex_cli" {
+		fields = append(fields,
+			hubField{"driver", "Backend", "Local Codex CLI"},
+			hubField{"command", "Command", s.command},
+			hubField{"codex_home", "CODEX_HOME", valueOr(s.codexHome, "~/.codex")},
+			hubField{"single_timeout", "单次调用超时", valueOr(s.singleTimeout, "3m")},
+			hubField{"worker_timeout", "Worker 超时", valueOr(s.workerTimeout, "30m")},
+		)
+		fields = append(fields, hubField{"models", "模型", fmt.Sprintf("%d 个", len(s.models))})
+		testModel := valueOr(s.testModelName(), "请先添加模型")
+		fields = append(fields, hubField{"test", "预检 Codex CLI", testModel})
+		fields = append(fields, hubField{"save", "保存配置", ""})
+		return fields
+	}
 	if s.providerType != "" {
 		fields = append(fields, hubField{"protocol", "协议", s.providerType})
 	}
@@ -240,6 +300,13 @@ func (s *modelConfigState) hubFields() []hubField {
 	fields = append(fields, hubField{"test", "测试连接", testModel})
 	fields = append(fields, hubField{"save", "保存配置", ""})
 	return fields
+}
+
+func valueOr(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (s *modelConfigState) testModelName() string {
@@ -290,6 +357,8 @@ func (s *modelConfigState) enterHubField(id string) (save bool, cmd tea.Cmd) {
 		return false, s.beginInlineEdit("key")
 	case "baseurl":
 		return false, s.beginInlineEdit("baseurl")
+	case "command", "codex_home", "single_timeout", "worker_timeout":
+		return false, s.beginInlineEdit(id)
 	case "models":
 		s.ensureModelOrigins()
 		s.step = configStepModels
@@ -315,6 +384,14 @@ func (s *modelConfigState) beginInlineEdit(field string) tea.Cmd {
 		return s.startTextInput("", placeholder, true)
 	case "baseurl":
 		return s.startTextInput(s.baseURL, "留空使用默认地址", false)
+	case "command":
+		return s.startTextInput(s.command, "codex", false)
+	case "codex_home":
+		return s.startTextInput(s.codexHome, "留空使用 ~/.codex", false)
+	case "single_timeout":
+		return s.startTextInput(s.singleTimeout, "3m", false)
+	case "worker_timeout":
+		return s.startTextInput(s.workerTimeout, "30m", false)
 	}
 	return nil
 }
@@ -364,6 +441,18 @@ func (s *modelConfigState) finishInlineEdit() bool {
 		}
 	case "baseurl":
 		s.baseURL = value
+	case "command":
+		if value == "" {
+			s.message = "Codex command 不能为空"
+			return false
+		}
+		s.command = value
+	case "codex_home":
+		s.codexHome = value
+	case "single_timeout":
+		s.singleTimeout = value
+	case "worker_timeout":
+		s.workerTimeout = value
 	}
 	s.input.Blur()
 	s.editingField = ""
@@ -527,7 +616,9 @@ func (s *modelConfigState) draft() host.ModelConfigurationDraft {
 		}
 	}
 	return host.ModelConfigurationDraft{
-		Provider: s.provider, Type: s.providerType, API: s.api, BaseURL: s.baseURL,
+		Provider: s.provider, Driver: s.driver, Command: s.command, CodexHome: s.codexHome,
+		SingleCallTimeout: s.singleTimeout, WorkerTimeout: s.workerTimeout,
+		Type: s.providerType, API: s.api, BaseURL: s.baseURL,
 		Models:       append([]bootstrap.ModelConfig(nil), s.models...),
 		Renames:      renames,
 		APIKeyAction: s.apiKeyAction, APIKey: s.apiKey,
@@ -831,7 +922,11 @@ func renderModelConfigModal(width int, state *modelConfigState) string {
 				hint += " · Delete 清除"
 			}
 			if state.cursor >= 0 && state.cursor < len(fields) && fields[state.cursor].id == "test" {
-				lines = append(lines, lipgloss.NewStyle().Foreground(colorDim).Render("测试会发送最小请求，可能产生少量 API 用量"))
+				help := "测试会发送最小请求，可能产生少量 API 用量"
+				if state.driver == "codex_cli" {
+					help = "仅预检版本、登录与隔离能力；不发送模型请求，不消耗额度"
+				}
+				lines = append(lines, lipgloss.NewStyle().Foreground(colorDim).Render(help))
 			}
 		}
 	case configStepProtocol:
@@ -852,7 +947,7 @@ func renderModelConfigModal(width int, state *modelConfigState) string {
 
 	if state.message != "" {
 		color := colorError
-		if strings.HasPrefix(state.message, "连接测试成功") {
+		if strings.HasPrefix(state.message, "连接测试成功") || strings.HasPrefix(state.message, "Codex CLI 预检成功") {
 			color = colorSuccess
 		} else if state.saving || state.testing || strings.HasPrefix(state.message, "已选择") ||
 			strings.HasPrefix(state.message, "API Key 已") || strings.HasPrefix(state.message, "连接测试已取消") {

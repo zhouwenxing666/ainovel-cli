@@ -27,6 +27,7 @@ func renderEPUB(
 	titleIdx chapterTitleIndex,
 	locations map[int]chapterLocation,
 	bodies map[int]string,
+	synopsis string,
 ) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -71,7 +72,7 @@ func renderEPUB(
 		return nil, err
 	}
 
-	if err := zipDeflate(zw, "OEBPS/content.opf", renderOPF(novelName, hasCover, chapters)); err != nil {
+	if err := zipDeflate(zw, "OEBPS/content.opf", renderOPF(novelName, hasCover, chapters, synopsis)); err != nil {
 		return nil, err
 	}
 
@@ -229,13 +230,17 @@ func renderNavXHTML(hasCover bool, chapters []int, titleIdx chapterTitleIndex) s
 
 // content.opf ────────────────────────────────────────────────
 
-func renderOPF(novelName string, hasCover bool, chapters []int) string {
+func renderOPF(novelName string, hasCover bool, chapters []int, synopsis string) string {
 	bookID := bookIdentifier(novelName)
 	modified := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 
 	title := strings.TrimSpace(novelName)
 	if title == "" {
 		title = "Untitled"
+	}
+	descriptionXML := ""
+	if s := strings.TrimSpace(synopsis); s != "" {
+		descriptionXML = `    <dc:description>` + html.EscapeString(s) + `</dc:description>` + "\n"
 	}
 
 	var b strings.Builder
@@ -247,11 +252,12 @@ func renderOPF(novelName string, hasCover bool, chapters []int) string {
     <dc:language>zh-CN</dc:language>
     <dc:creator>ainovel-cli</dc:creator>
     <meta property="dcterms:modified">%s</meta>
+		%s
   </metadata>
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="css" href="style.css" media-type="text/css"/>
-`, html.EscapeString(bookID), html.EscapeString(title), modified)
+`, html.EscapeString(bookID), html.EscapeString(title), modified, descriptionXML)
 
 	if hasCover {
 		b.WriteString(`    <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>` + "\n")

@@ -1,6 +1,6 @@
 # ainovel-cli
 
-全自动 AI 长篇小说创作引擎。确定性引擎跑完整本书，模型在每个需要判断的位置被精确使用：Engine 按事实路由驱动 Architect / Writer / Editor 三个自主创作代理，语义裁定按需唤醒 Arbiter。从一句话需求到完整小说，全程无需人工干预。
+全自动 AI 长篇小说创作引擎。确定性引擎跑完整本书，模型在每个需要判断的位置被精确使用：Engine 按事实路由驱动 Architect / Writer / Reviewer / Editor 四个自主创作代理，语义裁定按需唤醒 Arbiter。从一句话需求到完整小说，全程无需人工干预。
 
 <p align="center">
   <img src="scripts/sample.gif" alt="ainovel-cli demo" width="800">
@@ -9,7 +9,8 @@
 
 ## 特性
 
-- **确定性引擎 + 多智能体协作** — Engine 按事实决策表调度 Architect / Writer / Editor 三个自主创作代理，主循环零 LLM 开销、行为可穷举测试
+- **确定性引擎 + 多智能体协作** — Engine 按事实决策表调度 Architect / Writer / Reviewer / Editor 四个自主创作代理，主循环零 LLM 开销、行为可穷举测试
+- **逐章 Reviewer 质量闸** — 每次 Writer 提交后固定先按 Humanizer 检测并按需去 AI 味，再只在台词范围内优化情绪；无 AI 痕迹时跳过去 AI 改写，且由工具机械阻止台词外改动和超过 5% 的扩写
 - **语义裁定可审计** — 选规划师、干预分诊、失败出路等判断由 Arbiter 单次调用完成，每次裁定落盘可回放。越简单越稳定，拒绝复杂编排
 - **Step 级断点恢复** — 每个工具执行成功后写入 checkpoint，崩溃后精确到 plan/draft/check/commit 步骤级恢复
 - **卷弧双层滚动规划** — 长篇不再一次性规划全部章节。初始只规划前 2 卷弧骨架 + 第 1 弧详细章节，后续弧/卷在写作推进到时再由 Architect 展开，每次展开都参考前文摘要和角色状态，远期规划不空洞
@@ -23,30 +24,30 @@
 
 ## 架构
 
-核心设计：**事实层确定，语义层自主**。可枚举的状态迁移由确定性代码执行（Engine + Route）；边界清晰的判断按需咨询 LLM 函数（Arbiter）；开放式创作交给自主的 LLM 循环（Workers）。一句话概括：一个串行确定性 Engine、三个自主 Worker、少数几个按需 Arbiter 函数、一个文件系统事实层。
+核心设计：**事实层确定，语义层自主**。可枚举的状态迁移由确定性代码执行（Engine + Route）；边界清晰的判断按需咨询 LLM 函数（Arbiter）；开放式创作交给自主的 LLM 循环（Workers）。一句话概括：一个串行确定性 Engine、四个自主 Worker、少数几个按需 Arbiter 函数、一个文件系统事实层。
 
 ```
-┌─────────────────────────────────────────────────┐
-│              Host / Engine（确定性）              │
-│  读 Store → Route → 直接运行 Worker → 循环        │
-│  启动裁定 / 干预分诊 / 失败僵局 → 按需咨询 Arbiter  │
-└────┬──────────┬──────────┬─────────────┬────────┘
-     │          │          │             │
- ┌───▼────┐ ┌───▼───┐ ┌────▼────┐   ┌────▼────┐
- │Architect│ │Writer │ │ Editor  │   │ Arbiter │
- │(LLM循环)│ │(LLM循环)│ │(LLM循环)│   │(LLM函数)│
- └───┬────┘ └───┬───┘ └────┬────┘   └─────────┘
-     └──────────┼──────────┘
-                │ 工具调用（IO + checkpoint）
-┌───────────────▼─────────────────────────────────┐
-│                   Store                         │
-│  Progress / Checkpoint / Outline / Drafts / ... │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                 Host / Engine（确定性）                    │
+│  读 Store → Route → 直接运行 Worker → 循环                │
+│  启动裁定 / 干预分诊 / 失败僵局 → 按需咨询 Arbiter          │
+└────┬──────────┬──────────┬──────────┬─────────────┬──────┘
+     │          │          │          │             │
+ ┌───▼────┐ ┌───▼───┐ ┌────▼────┐ ┌───▼────┐  ┌────▼────┐
+ │Architect│ │Writer │ │Reviewer │ │ Editor │  │ Arbiter │
+ │(LLM循环)│ │(LLM循环)│ │(LLM循环)│ │(LLM循环)│  │(LLM函数)│
+ └───┬────┘ └───┬───┘ └────┬────┘ └───┬────┘  └─────────┘
+     └──────────┴───────────┴──────────┘
+                       │ 工具调用（IO + checkpoint）
+┌──────────────────────▼──────────────────────────────────┐
+│                         Store                           │
+│        Progress / Checkpoint / Outline / Drafts / ...   │
+└─────────────────────────────────────────────────────────┘
 ```
 
 - **Engine** — 每轮从 Store 读事实、按 Route 决策表派发 Worker，执行决定、不参与文学判断；崩溃恢复=读 store 续跑,无会话可恢复
 - **Arbiter** — 按需唤醒的语义裁定（选规划师、用户干预分诊、失败/僵局出路），事实进、结构化决策出，每次裁定落盘可审计可回放
-- **Workers** — Architect / Writer / Editor 各自独立 context 的自主创作循环，通过 Store 中的工件协作
+- **Workers** — Architect / Writer / Reviewer / Editor 各自独立 context 的自主创作循环，通过 Store 中的工件协作
 - **Tools** — 单文件原子 IO + 幂等重放；章节提交使用持久化 Saga + checkpoint，只返事实 JSON，不夹带指令
 
 ### 智能体职责
@@ -56,17 +57,18 @@
 | **Arbiter** | 语义裁定：启动选规划师、用户干预分诊、失败/僵局出路 | 无（单次 LLM 调用，输出结构化决策） |
 | **Architect** | 生成前提、大纲、角色档案、世界规则 | `novel_context` `save_foundation` |
 | **Writer** | 自主完成一章的构思、写作、自审和提交 | `novel_context` `read_chapter` `plan_chapter` `draft_chapter` `check_consistency` `commit_chapter` |
+| **Reviewer** | 每章提交后先检测并按需去 AI 味，再只优化台词情绪 | `novel_context` `read_chapter` `finalize_reviewed_chapter` |
 | **Editor** | 阅读原文，从结构和审美两个层面审阅 | `novel_context` `read_chapter` `save_review` `save_arc_summary` `save_volume_summary` |
 
 ### 写作流程
 
 ```
-用户需求 → Arbiter 选规划师 → Architect 规划骨架+首弧 → Writer 逐章写作 → Editor 弧级评审
-              (裁定落盘)                                     ↑                   │
-                                                            ├── 重写/打磨 ◄──────┘
-                                                            │
-                                                     Architect 展开下一弧/卷
-                                                    （参考前文摘要+角色快照）
+用户需求 → Arbiter 选规划师 → Architect 规划 → Writer 写章 → Reviewer 逐章处理 → Editor 弧级评审
+              (裁定落盘)                         ↑              │                    │
+                                                ├── 重写/打磨 ◄─┴────────────────────┘
+                                                │
+                                         Architect 展开下一弧/卷
+                                        （参考前文摘要+角色快照）
 ```
 
 每一步"下一个派谁"由 Engine 的 Route 决策表按 Store 事实推导（万级组合穷举测试钉死），不消耗任何 LLM 调用。
@@ -79,6 +81,8 @@ Writer 按固定顺序完成每章（写作内容完全自主，工具调用顺�
 4. `draft_chapter` — 写入整章正文
 5. `check_consistency` — 对照状态数据检查一致性（必须在 draft 之后）
 6. `commit_chapter` — 提交终稿，落盘事实字段（`arc_end` / `next_chapter` / 反馈池等），下一步由 Engine 按 Route 决策表推导
+
+每次 `commit_chapter`（包括返工提交）都会建立 `PendingReviewChapter` 事实。Engine 在派下一章 Writer 或弧末 Editor 前，必须先派 Reviewer：Humanizer 检测/按需改写 → 台词情绪优化 → `finalize_reviewed_chapter`。该工具用来源摘要防止覆盖并发新稿，并机械校验 Humanizer 分支、台词外逐字不变、引号/排版不变和终稿最多增加 5%。外部小说导入复用独立的 import commit 配置，不进入这条 Writer 专属质量闸。
 
 ### 状态迁移规则
 
@@ -207,7 +211,7 @@ go install github.com/voocel/ainovel-cli/cmd/ainovel-cli@latest
 ainovel-cli --version
 ainovel-cli update
 
-# 首次运行，自动进入引导流程（选择 Provider → 输入 API Key → Base URL → 模型名）
+# 首次运行，自动进入引导流程（Local Codex 自动采用 gpt-5.6-sol / xhigh）
 ainovel-cli
 ```
 
@@ -217,6 +221,8 @@ ainovel-cli
 ### Docker
 
 Docker 镜像适合在服务器/NAS 上运行 headless 长任务，也可以用 `-it` 进入 TUI。配置和作品目录建议挂载到宿主机：
+
+> `driver: "codex_cli"` 的本地 Codex backend **不能在 Docker 中使用**。它只支持 macOS 宿主机上的本地进程与本地登录；Docker 中请使用 HTTP provider。
 
 ```bash
 mkdir -p config workspace
@@ -294,6 +300,7 @@ docker compose run --rm ainovel --headless --prompt "写一本悬疑短篇"
 - 标量字段按后者覆盖前者，例如 `provider`、`model`、`reasoning_effort`、`style`
 - `providers` 和 `roles` 按 key 合并，同名项内部按字段覆盖
 - 未填写的字段会继承上层配置，例如项目级配置只写 `base_url` 时会保留全局配置中的 `api_key`
+- Codex CLI 的进程边界字段 `driver`、`command`、`codex_home`、`single_call_timeout`、`worker_timeout` 只信任全局配置；项目配置只能引用该 provider，并覆盖模型、角色、角色 timeout、推理强度和 fallback
 - 不支持用空字符串清空上层已有值；如需清空，请直接编辑更高优先级的配置文件
 
 > ⚠️ `provider`（以及 `roles.*.provider`）的值是 `providers` 里的 **key 名**——一根指针，不是协议名。项目级若把 `provider` 切到一个全局 `providers` 里不存在的账号，必须在项目级同时补上该账号的凭证（`api_key` / `base_url`），否则启动会报“未配置凭证”。
@@ -302,11 +309,11 @@ docker compose run --rm ainovel --headless --prompt "写一本悬疑短篇"
 
 上下文窗口按“模型专属值 → 旧顶层 `context_window` → 模型注册表 → 200K 兜底”的顺序解析。它只影响本地上下文压缩时机，不改变远端 API 的真实请求限制。
 
-`/config` 只用来**编辑 Provider 的定义**（协议 / API Key / Base URL / 模型库），不负责“当前用哪个模型”——切换模型与推理强度请用 `/model`。模型列表支持 `↑↓` 选行、`←→` 选字段、`Enter` 原位编辑模型 ID 或上下文窗口、`Delete` 删除；末尾可直接新增模型，不再进入多层详情页。窗口可输入整数、`128K`、`1M`，留空表示自动解析。保存**就近写回当前生效的那份配置**——项目目录有 `./.ainovel/config.json` 就写它，否则写全局 `~/.ainovel/config.json`——并立即热应用。普通修改只补对应 Provider 段；显式修改模型 ID 时，会在同一次原子写入中同步迁移顶层、角色和 fallback 引用。被引用的模型不能直接删除，需先在 `/model` 切走。API Key 输入始终隐藏。
+`/config` 只用来**编辑 Provider 的定义**（backend / 协议 / 凭证 / 模型库），不负责“当前用哪个模型”——切换模型与推理强度请用 `/model`。模型列表支持 `↑↓` 选行、`←→` 选字段、`Enter` 原位编辑模型 ID 或上下文窗口、`Delete` 删除；末尾可直接新增模型，不再进入多层详情页。窗口可输入整数、`128K`、`1M`，留空表示自动解析。保存**就近写回当前生效的那份配置**——项目目录有 `./.ainovel/config.json` 就写它，否则写全局 `~/.ainovel/config.json`——并立即热应用。Codex 的可信进程字段始终写入全局配置，项目文件只保存安全覆盖。普通修改只补对应 Provider 段；显式修改模型 ID 时，会在同一次原子写入中同步迁移顶层、角色和 fallback 引用。被引用的模型不能直接删除，需先在 `/model` 切走。API Key 输入始终隐藏。
 
-Provider 详情中的 API Key 与 Base URL 支持原位编辑，已有 Key 只显示首尾脱敏提示；“测试连接”会使用当前草稿和所选模型发送一个最小真实请求，可能产生少量 API 用量，但测试结果不会阻止保存或触发自动降级。任意 `extra`、`extra_body`、`stream_idle_timeout` 等高级配置仍在界面显示的实际配置文件中维护。
+HTTP Provider 详情中的 API Key 与 Base URL 支持原位编辑，已有 Key 只显示首尾脱敏提示；“测试连接”会使用当前草稿和所选模型发送一个最小真实请求，可能产生少量 API 用量。Codex CLI 的“预检”只检查命令、最低版本、隔离能力和本地登录，不发送模型请求。测试结果不会触发自动降级。任意 `extra`、`extra_body`、`stream_idle_timeout` 等高级 HTTP 配置仍在界面显示的实际配置文件中维护。
 
-`reasoning_effort` 为默认推理强度，可选值为 `off` / `low` / `medium` / `high` / `xhigh` / `max`；省略或空字符串表示沿用模型/provider 默认。`roles.<role>.reasoning_effort` 可按角色覆盖，未配置时继承顶层 `reasoning_effort`。推理强度按“意图 × 能力”生效：配置里存的是你选定的**原始意图**，实际下发时再按该角色**当前模型的能力**钳制——换到能力较低的模型只是当次生效值被钳低，存储的意图不变，切回强模型即自动恢复。TUI `/model` 面板切换 provider、model 或推理强度后，会写回当前生效的那份配置（与 `/config` 一致：项目级存在则写项目，否则写全局）。
+`reasoning_effort` 为默认推理强度，可选值为 `off` / `low` / `medium` / `high` / `xhigh` / `max`；一般情况下省略或空字符串表示沿用模型/provider 默认，选中的 Local Codex 是特例，会补为 `xhigh`。`roles.<role>.reasoning_effort` 可按角色覆盖，未配置时继承顶层 `reasoning_effort`。推理强度按“意图 × 能力”生效：配置里存的是你选定的**原始意图**，实际下发时再按该角色**当前模型的能力**钳制——换到能力较低的模型只是当次生效值被钳低，存储的意图不变，切回强模型即自动恢复。TUI `/model` 面板切换 provider、model 或推理强度后，会写回当前生效的那份配置（与 `/config` 一致：项目级存在则写项目，否则写全局）。
 
 `providers.<name>.api` 仅对 `type: "openai"` 或内置 `openai` 生效，用于选择 OpenAI 协议 endpoint：`chat`（默认，`base_url + /chat/completions`）或 `responses`（`base_url + /responses`）。`base_url` 若已包含路径（如火山方舟的 `/api/v3`），该路径会原样保留；只填写域名时默认使用 OpenAI 的 `/v1`。Codex 类代理通常需要配置为 `responses`。
 
@@ -344,7 +351,7 @@ output/novel/meta/simulation_profile.json
 /importsim ./profile.json
 ```
 
-`/importsim` 只接受本功能生成的 `simulation_profile.v1` JSON，并按语料指纹合并，重复来源会跳过。只导入可信来源的画像文件；导入内容会成为后续 Agent 的上下文参考。画像会以 compact 形式注入 `novel_context`，Architect、Writer、Editor 都能读取；各 Agent 只借鉴结构、节奏、钩子和吸引读者手法，不复制原文表达或专有设定。
+`/importsim` 只接受本功能生成的 `simulation_profile.v1` JSON，并按语料指纹合并，重复来源会跳过。只导入可信来源的画像文件；导入内容会成为后续 Agent 的上下文参考。画像会以 compact 形式注入 `novel_context`，Architect、Writer、Reviewer、Editor 都能读取；各 Agent 只借鉴结构、节奏、钩子和吸引读者手法，不复制原文表达或专有设定。
 
 ## 导入
 
@@ -422,7 +429,47 @@ output/novel/meta/simulation_profile.json
 }
 ```
 
-可配置的角色：`architect` / `writer` / `editor`，以及导入管线的三个语义函数档位 `import_segment` / `import_analyze` / `import_synthesize`（未配置时落到 architect；可把机械性更强的切分指到更便宜的模型省成本）。语义裁定 Arbiter 统一使用 default 模型，当前不开放独立角色配置。
+可配置的角色：`arbiter` / `architect` / `writer` / `reviewer` / `editor`，以及导入管线的三个语义函数档位 `import_segment` / `import_analyze` / `import_synthesize`（未配置时落到 architect；可把机械性更强的切分指到更便宜的模型省成本）。任何未配置角色都继承顶层 default。
+
+#### 使用本机 Codex CLI 登录
+
+macOS 用户可以复用本机 Codex CLI 的 saved login，无需给 ainovel 配置 API Key。先安装受支持版本的 Codex CLI 并执行 `codex login`，然后在首次向导或 `/config` 中选择 Local Codex CLI：
+
+```jsonc
+{
+  "provider": "local-codex",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "xhigh",
+  "providers": {
+    "local-codex": {
+      "driver": "codex_cli",
+      "command": "codex",
+      "models": [{ "name": "gpt-5.6-sol" }],
+      "single_call_timeout": "3m",
+      "worker_timeout": "30m"
+    }
+  },
+  "roles": {
+    "arbiter": { "provider": "local-codex", "model": "gpt-5.6-sol" },
+    "writer": {
+      "provider": "local-codex",
+      "model": "gpt-5.6-sol",
+      "timeout": "30m",
+      "fallbacks": [{ "provider": "openrouter", "model": "anthropic/claude-sonnet-4" }]
+    }
+  }
+}
+```
+
+首次向导会直接保存 `gpt-5.6-sol` 和 `xhigh`；通过 `/config` 新增 Local Codex 时也会预置该模型。已有 Local Codex 配置若缺少顶层 `model`、`reasoning_effort` 或 provider 模型列表，加载时会在内存中补齐这些默认值；用户已经显式配置的值不会被覆盖，也不会自动重写原文件。
+
+`command` 只接受裸命令名或绝对路径，显式 `codex_home` 必须是绝对路径；省略 `codex_home` 时默认使用 `~/.codex`。AINovel 只复制其中的 `auth.json` 到每次任务的临时目录。每次调用都是独立 ephemeral session，忽略用户 Codex config、AGENTS、rules、skills、hooks 和已有 MCP，在空目录和只读 sandbox 中运行。Worker 只能通过本次任务的私有 MCP 调用其原有小说工具，不能直接读写小说 Store 或源码。隔离能力、登录或最低 CLI 版本不满足时会拒绝启动、保存或切换，不会降级放行，也不会自动安装或登录。
+
+Codex 的结构化输出契约会由 adapter 自动转换为 CLI 接受的 strict JSON Schema；正常使用不需要额外设置 `json_schema`，在 `/config` 中配置 Codex 命令和模型即可。
+
+Codex CLI backend 可用于顶层 default、Arbiter、Architect、Writer、Reviewer、Editor 与正常流程中的单次语义调用；HTTP/Codex 可以混用。Worker fallback 以完整任务为单位：发生业务写入前可以切换 backend，发生写入后则把控制权交回 Engine，由 Engine 重读 Store/Checkpoint 后恢复。Codex 会记录 token、调用和耗时，但 saved-login 调用没有可验证的 API 美元价格，因此不计入 API 美元预算。
+
+该 backend 仅支持 macOS 本机运行，不支持 Windows、Linux 或 Docker。`codex-proxy` 一节描述的是带 API Key 的 HTTP 代理指纹配置，与本地 `codex_cli` 不是一回事。完整安全与实现约束见 [Codex CLI Backend](docs/codex-cli-backend.md)。
 
 #### 自定义代理
 
@@ -533,7 +580,7 @@ output/novel/meta/simulation_profile.json
 
 ### 去 AI 味与自定义规则
 
-内置一份去 AI 味基线（出厂默认）：机械黑名单（套句 / 疲劳词，代码内置 `rules.SystemDefaults()`，commit 时确定性检查）+ 语义判据 `assets/references/anti-ai-tone.md`（注入 writer / editor 规避与举证）。
+内置一份去 AI 味基线（出厂默认）：机械黑名单（套句 / 疲劳词，代码内置 `rules.SystemDefaults()`，commit 时确定性检查）+ 语义判据 `assets/references/anti-ai-tone.md`（注入 writer / editor 规避与举证）+ 逐章 Reviewer 的 Humanizer 检测/按需改写。Reviewer 的第二步采用优化后的 `情绪优化prompt.txt` 原则，只动台词，并带防 AI 回归约束。
 
 想叠加自己的偏好**无需改源码**：在 `~/.ainovel/rules/` 目录（全局，放任意 `.md`，按文件名字典序合并）或 `./.ainovel/rules/` 目录（本书，同样放任意 `.md`，与全局同形态）里，**用大白话写偏好即可**（如「主角别写成圣母」「多用身体感知」「每章 3000 字左右」「不要出现『某种程度上』」）——零格式、零 YAML。系统会用模型把这些自然语言要求归一化成本书规则快照（字数范围 / 禁用词 / 疲劳词阈值等结构化约束 + 风格偏好），写作时自动遵循、提交时自动机械自检；常见 AI 套句与疲劳词的机械基线已内置，不写也能用，就近覆盖、与内置基线叠加生效。
 

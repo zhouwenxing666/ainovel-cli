@@ -229,6 +229,50 @@ func TestModelConfigModalDoesNotRenderAPIKey(t *testing.T) {
 	}
 }
 
+func TestProviderHubSupportsLocalCodexCLIWithoutAPIKey(t *testing.T) {
+	state := &modelConfigState{}
+	preset := bootstrap.ProviderPreset{
+		Name: "local-codex", Label: "Local Codex CLI", Driver: "codex_cli", APIKeyOptional: true,
+	}
+	state.applyProviderChoice(configProviderChoice{preset: &preset})
+	state.models = []bootstrap.ModelConfig{{Name: "gpt-5.4"}}
+
+	fields := state.hubFields()
+	var ids []string
+	for _, field := range fields {
+		ids = append(ids, field.id)
+	}
+	joined := strings.Join(ids, ",")
+	if strings.Contains(joined, "key") || strings.Contains(joined, "baseurl") || !strings.Contains(joined, "command") || !strings.Contains(joined, "codex_home") || !strings.Contains(joined, "worker_timeout") {
+		t.Fatalf("Codex hub fields = %s", joined)
+	}
+	draft := state.draft()
+	if draft.Driver != "codex_cli" || draft.Command != "codex" || draft.SingleCallTimeout != "3m" || draft.WorkerTimeout != "30m" || draft.APIKeyAction != host.APIKeyReplace {
+		t.Fatalf("Codex draft = %#v", draft)
+	}
+}
+
+func TestProviderHubSeedsDefaultLocalCodexModel(t *testing.T) {
+	var localCodex *bootstrap.ProviderPreset
+	for _, candidate := range bootstrap.ProviderPresets() {
+		if candidate.Name == "local-codex" {
+			preset := candidate
+			localCodex = &preset
+			break
+		}
+	}
+	if localCodex == nil {
+		t.Fatal("Local Codex provider preset is missing")
+	}
+
+	state := &modelConfigState{}
+	state.applyProviderChoice(configProviderChoice{preset: localCodex})
+
+	if len(state.models) != 1 || state.models[0].Name != "gpt-5.6-sol" {
+		t.Fatalf("new Local Codex models = %#v, want gpt-5.6-sol", state.models)
+	}
+}
+
 func TestProviderHubEditsAPIKeyInlineAndTrims(t *testing.T) {
 	state := &modelConfigState{step: configStepHub, provider: "proxy", existing: true,
 		hasAPIKey: true, apiKeyHint: "sk-o******7890", apiKeyOptional: true, apiKeyAction: host.APIKeyKeep}
@@ -397,6 +441,23 @@ func TestProviderHubShowsConfigPathAndConnectionAction(t *testing.T) {
 	}
 }
 
+func TestCodexProviderHubExplainsQuotaFreePreflight(t *testing.T) {
+	state := &modelConfigState{
+		step: configStepHub, provider: "local-codex", driver: "codex_cli",
+		apiKeyOptional: true, models: []bootstrap.ModelConfig{{Name: "gpt-5.4"}},
+	}
+	state.cursor = hubFieldIndex(state.hubFields(), "test")
+	view := renderModelConfigModal(120, state)
+	for _, want := range []string{"不发送模型请求", "版本", "登录", "隔离能力"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Codex 预检说明缺少 %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "可能产生少量 API 用量") {
+		t.Fatalf("Codex 预检不应显示 API 用量提示:\n%s", view)
+	}
+}
+
 func TestModelConfigMessageWrapKeepsErrorTail(t *testing.T) {
 	state := &modelConfigState{step: configStepHub, provider: "proxy", apiKeyOptional: true,
 		message: "连接失败：" + strings.Repeat("上游返回了很长的错误信息", 8) + " UNIQUE-ERROR-TAIL"}
@@ -432,6 +493,16 @@ func TestConnectionTestCanBeCancelled(t *testing.T) {
 	m = updated.(Model)
 	if !handled || m.modelConfig.testing || m.modelConfig.message != "连接测试已取消" {
 		t.Fatalf("取消结果未正确收敛: handled=%v testing=%v message=%q", handled, m.modelConfig.testing, m.modelConfig.message)
+	}
+}
+
+func TestCodexConnectionResultIsReportedAsPreflight(t *testing.T) {
+	state := &modelConfigState{step: configStepHub, provider: "local-codex", driver: "codex_cli", testing: true}
+	m := Model{modelConfig: state}
+	updated, _, handled := m.handleRuntimeMsg(modelConfigConnectionMsg{model: "gpt-5.4"})
+	m = updated.(Model)
+	if !handled || m.modelConfig.testing || !strings.Contains(m.modelConfig.message, "Codex CLI 预检成功") {
+		t.Fatalf("Codex 预检结果未正确显示: handled=%v testing=%v message=%q", handled, m.modelConfig.testing, m.modelConfig.message)
 	}
 }
 

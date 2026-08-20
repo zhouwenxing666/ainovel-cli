@@ -41,6 +41,7 @@ func TestRoute_NilProgress(t *testing.T) {
 }
 
 func TestRoute_PhaseComplete(t *testing.T) {
+	// 完本期返回 nil：作品简介在初始化阶段写入 premise.md，完本后无需再派发任何 agent。
 	s := State{Progress: &domain.Progress{Phase: domain.PhaseComplete}}
 	if got := Route(s); got != nil {
 		t.Fatalf("expected nil at PhaseComplete, got %+v", got)
@@ -68,6 +69,24 @@ func TestRoute_PendingRewritesFirst(t *testing.T) {
 	}
 	if got.Chapter != 3 {
 		t.Errorf("expected Chapter=3, got %d", got.Chapter)
+	}
+}
+
+func TestRoute_ReviewerRunsBeforeRewriteAndEditor(t *testing.T) {
+	p := writingProgress([]int{1, 2}, domain.FlowRewriting)
+	p.PendingReviewChapter = 2
+	p.PendingRewrites = []int{1}
+	got := Route(State{
+		Progress: p, LastCompleted: 2,
+		ArcBoundary: &storepkg.ArcBoundary{IsArcEnd: true, Volume: 1, Arc: 1},
+	})
+	if got == nil || got.Agent != "reviewer" || got.Chapter != 2 {
+		t.Fatalf("Reviewer 应优先于返工队列和弧末 Editor，got %+v", got)
+	}
+	for _, want := range []string{"Humanizer", "情绪优化", "finalize_reviewed_chapter"} {
+		if !strings.Contains(got.Task, want) {
+			t.Errorf("Reviewer 任务缺少 %q: %s", want, got.Task)
+		}
 	}
 }
 

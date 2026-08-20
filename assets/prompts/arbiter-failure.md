@@ -21,4 +21,4 @@ Worker 期间可能落了 plan/draft/edit 等中间产物，但它们不等于�
 - 任务文本本身可能有歧义 → `reroute` 同一 agent 但改写更明确的 task
 - 无法判断 → `abort`（宁可停下等人，不做无谓消耗）
 
-dispatch.agent 只能是 architect_long / architect_short / writer / editor。
+dispatch.agent 只能是 architect_long / architect_short / writer / reviewer / editor。

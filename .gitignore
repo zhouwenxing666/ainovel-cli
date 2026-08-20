@@ -44,3 +44,4 @@ tasks
 refer/
 output*
 workspace/
+.gstack/

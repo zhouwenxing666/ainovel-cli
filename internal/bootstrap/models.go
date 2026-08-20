@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/voocel/agentcore"
 	"github.com/voocel/agentcore/llm"
+	"github.com/voocel/ainovel-cli/internal/codexcli"
 	"github.com/voocel/ainovel-cli/internal/errs"
 	"github.com/voocel/ainovel-cli/internal/llmcontract"
 )
@@ -125,6 +127,23 @@ func (m *SwappableModel) Current() (provider, name string) {
 	return m.provider, m.name
 }
 
+// CurrentModel 返回当前底层 adapter，供 Worker 后端选择与诊断使用。
+func (m *SwappableModel) CurrentModel() agentcore.ChatModel {
+	return m.SwappableModel.Current()
+}
+
+// OverallTimeout forwards the optional whole-operation timeout exposed by
+// process-backed completion models. Keeping it on the stable swappable handle
+// lets Arbiter bound its entire correction loop after hot switches.
+func (m *SwappableModel) OverallTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if provider, ok := m.SwappableModel.Current().(interface{ OverallTimeout() time.Duration }); ok {
+		return provider.OverallTimeout()
+	}
+	return 0
+}
+
 // ModelSet 持有按角色分配的模型实例，未配置的角色回退到默认模型。
 type ModelSet struct {
 	mu        sync.RWMutex
@@ -142,6 +161,71 @@ func (ms *ModelSet) ForRole(role string) agentcore.ChatModel {
 		return m
 	}
 	return ms.Default
+}
+
+// DynamicRole returns a stable model handle that resolves the role at each
+// call. This matters when a role inherited default at startup and later gains
+// an explicit hot-switched model.
+func (ms *ModelSet) DynamicRole(role string) agentcore.ChatModel {
+	return &dynamicRoleModel{set: ms, role: role}
+}
+
+// DynamicRoleWithFailover is the stable handle for single-shot role calls
+// such as Arbiter. It resolves both the primary and explicit fallback list at
+// each call boundary, so /model and /config hot changes take effect together.
+func (ms *ModelSet) DynamicRoleWithFailover(role string, report FailoverReporter) agentcore.ChatModel {
+	return &dynamicRoleModel{set: ms, role: role, failover: true, report: report}
+}
+
+type dynamicRoleModel struct {
+	set      *ModelSet
+	role     string
+	failover bool
+	report   FailoverReporter
+}
+
+func (m *dynamicRoleModel) current() agentcore.ChatModel {
+	if m.failover {
+		return m.set.ForRoleWithFailover(m.role, m.report)
+	}
+	return m.set.ForRole(m.role)
+}
+func (m *dynamicRoleModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	return m.current().Generate(ctx, messages, tools, opts...)
+}
+func (m *dynamicRoleModel) GenerateStream(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
+	return m.current().GenerateStream(ctx, messages, tools, opts...)
+}
+func (m *dynamicRoleModel) SupportsTools() bool { return m.current().SupportsTools() }
+func (m *dynamicRoleModel) Capabilities() llm.Capabilities {
+	if provider, ok := m.current().(llm.CapabilityProvider); ok {
+		return provider.Capabilities()
+	}
+	return llm.Capabilities{}
+}
+func (m *dynamicRoleModel) Info() llm.ModelInfo {
+	if provider, ok := m.current().(interface{ Info() llm.ModelInfo }); ok {
+		return provider.Info()
+	}
+	return llm.ModelInfo{}
+}
+func (m *dynamicRoleModel) OverallTimeout() time.Duration {
+	if provider, ok := m.current().(interface{ OverallTimeout() time.Duration }); ok {
+		return provider.OverallTimeout()
+	}
+	return 0
+}
+func (m *dynamicRoleModel) JSONSchemaOverride() *bool {
+	if provider, ok := m.current().(interface{ JSONSchemaOverride() *bool }); ok {
+		return provider.JSONSchemaOverride()
+	}
+	return nil
+}
+func (m *dynamicRoleModel) StructuredOutputFacts() llmcontract.ModelFacts {
+	if provider, ok := m.current().(interface{ StructuredOutputFacts() llmcontract.ModelFacts }); ok {
+		return provider.StructuredOutputFacts()
+	}
+	return llmcontract.ModelFacts{Capabilities: m.Capabilities(), Info: m.Info(), JSONSchemaOverride: m.JSONSchemaOverride()}
 }
 
 // ForRoleWithFailover 返回带有单次请求级 fallback 的角色模型。
@@ -205,7 +289,11 @@ func (ms *ModelSet) Swap(role, provider, model string) error {
 	if !ok {
 		return fmt.Errorf("provider %q is not configured: %w", provider, errs.ErrConfig)
 	}
-	next, err := createModelFromConfig(provider, model, pc, make(map[string]agentcore.ChatModel))
+	build := modelBuildOptions{reasoningEffort: ms.config.ResolveReasoningEffort(role)}
+	if rc, ok := ms.config.Roles[role]; ok {
+		build.timeout = rc.Timeout
+	}
+	next, err := createModelFromConfig(provider, model, pc, make(map[string]agentcore.ChatModel), build)
 	if err != nil {
 		return fmt.Errorf("切换模型失败: %w", err)
 	}
@@ -243,6 +331,44 @@ func (ms *ModelSet) ResolveContextWindow(provider, model string) (int, ContextWi
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
 	return ms.config.ResolveContextWindow(provider, model)
+}
+
+// ConfigSnapshot returns the latest hot-applied configuration for backend
+// selection at an Engine task boundary.
+func (ms *ModelSet) ConfigSnapshot() Config {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	return CloneConfig(ms.config)
+}
+
+// WorkerSelection atomically snapshots both the role selection and the config
+// that defines its process boundary/fallbacks. A hot apply therefore belongs
+// wholly to either this task or the next one, never half to each.
+func (ms *ModelSet) WorkerSelection(role string) (cfg Config, provider, model string, explicit bool) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	if selected, ok := ms.models[role]; ok {
+		provider, model = selected.Current()
+		explicit = true
+	} else {
+		provider, model = ms.Default.Current()
+	}
+	return CloneConfig(ms.config), provider, model, explicit
+}
+
+// ModelForRef builds an adapter for a complete task-level fallback target.
+// It does not mutate the current role selection.
+func (ms *ModelSet) ModelForRef(provider, model, role string) (agentcore.ChatModel, error) {
+	cfg := ms.ConfigSnapshot()
+	pc, ok := cfg.Providers[provider]
+	if !ok {
+		return nil, fmt.Errorf("provider %q is not configured: %w", provider, errs.ErrConfig)
+	}
+	build := modelBuildOptions{reasoningEffort: cfg.ResolveReasoningEffort(role)}
+	if rc, ok := cfg.Roles[role]; ok {
+		build.timeout = rc.Timeout
+	}
+	return createModelFromConfig(provider, model, pc, make(map[string]agentcore.ChatModel), build)
 }
 
 // ApplyPrepared 提交一个已成功构建的候选 ModelSet。已有 SwappableModel 的地址
@@ -305,7 +431,9 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 
 	// 创建默认模型
 	defaultPC := cfg.DefaultProviderConfig()
-	defaultModel, err := createModelFromConfig(cfg.Provider, cfg.ModelName, defaultPC, cache)
+	defaultModel, err := createModelFromConfig(cfg.Provider, cfg.ModelName, defaultPC, cache, modelBuildOptions{
+		reasoningEffort: cfg.ResolveReasoningEffort("default"),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("default model: %w", err)
 	}
@@ -323,7 +451,8 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 		if !ok {
 			return nil, fmt.Errorf("role %s references unknown provider %q: %w", role, rc.Provider, errs.ErrConfig)
 		}
-		m, err := createModelFromConfig(rc.Provider, rc.Model, pc, cache)
+		build := modelBuildOptions{reasoningEffort: cfg.ResolveReasoningEffort(role), timeout: rc.Timeout}
+		m, err := createModelFromConfig(rc.Provider, rc.Model, pc, cache, build)
 		if err != nil {
 			return nil, fmt.Errorf("role %s model: %w", role, err)
 		}
@@ -339,7 +468,7 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 			if !ok {
 				return nil, fmt.Errorf("role %s fallback references unknown provider %q: %w", role, fallback.Provider, errs.ErrConfig)
 			}
-			fm, err := createModelFromConfig(fallback.Provider, fallback.Model, fpc, cache)
+			fm, err := createModelFromConfig(fallback.Provider, fallback.Model, fpc, cache, build)
 			if err != nil {
 				return nil, fmt.Errorf("role %s fallback %s/%s: %w", role, fallback.Provider, fallback.Model, err)
 			}
@@ -356,9 +485,43 @@ func NewModelSet(cfg Config) (*ModelSet, error) {
 	return ms, nil
 }
 
-// createModelFromConfig 创建或复用 ChatModel 实例。
-func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache map[string]agentcore.ChatModel) (agentcore.ChatModel, error) {
+type modelBuildOptions struct {
+	reasoningEffort string
+	timeout         string
+}
+
+// createModelFromConfig 创建或复用单次调用 ChatModel 实例。Codex Worker
+// 任务不经此 adapter 执行；它只服务 Arbiter 与其它无工具直接调用。
+func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache map[string]agentcore.ChatModel, build modelBuildOptions) (agentcore.ChatModel, error) {
 	cacheKey := providerKey + "|" + model
+	if pc.IsCodexCLI() {
+		timeout, err := pc.SingleCallTimeoutValue()
+		if err != nil {
+			return nil, fmt.Errorf("provider %s single_call_timeout: %w: %w", providerKey, errs.ErrConfig, err)
+		}
+		if strings.TrimSpace(build.timeout) != "" {
+			timeout, err = time.ParseDuration(strings.TrimSpace(build.timeout))
+			if err != nil || timeout <= 0 {
+				return nil, fmt.Errorf("provider %s role timeout %q must be a positive duration: %w", providerKey, build.timeout, errs.ErrConfig)
+			}
+		}
+		cacheKey += "|codex_cli|" + build.reasoningEffort + "|" + timeout.String()
+		if m, ok := cache[cacheKey]; ok {
+			return m, nil
+		}
+		runtime := codexcli.NewRuntime(codexcli.RuntimeConfig{
+			Command:   pc.Command,
+			CodexHome: pc.CodexHome,
+		})
+		m := codexcli.NewCompletionModel(runtime, codexcli.CompletionModelConfig{
+			Provider:        providerKey,
+			Model:           model,
+			ReasoningEffort: build.reasoningEffort,
+			Timeout:         timeout,
+		})
+		cache[cacheKey] = m
+		return m, nil
+	}
 	if m, ok := cache[cacheKey]; ok {
 		return m, nil
 	}
@@ -506,6 +669,13 @@ func (m *failoverModel) StructuredOutputFacts() llmcontract.ModelFacts {
 		return llmcontract.ModelFacts{}
 	}
 	return m.primary.StructuredOutputFacts()
+}
+
+func (m *failoverModel) OverallTimeout() time.Duration {
+	if m.primary == nil {
+		return 0
+	}
+	return m.primary.OverallTimeout()
 }
 
 func (m *failoverModel) currentTarget() modelTarget {

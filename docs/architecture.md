@@ -1,6 +1,6 @@
 # ainovel-cli 运行时架构
 
-> 事实层确定，语义层自主：一个串行确定性 Engine、三个自主 Worker、少数几个按需 Arbiter 函数、一个文件系统事实层。
+> 事实层确定，语义层自主：一个串行确定性 Engine、四个自主 Worker、少数几个按需 Arbiter 函数、一个文件系统事实层。
 >
 > 2026-07-12 控制面更替完成：Coordinator LLM 长循环退役，由 Engine（确定性循环）+ Arbiter（语义裁定函数）接管。设计决策与评审记录见 `docs/engine-arbiter.md`，RFC 见 `docs/engine-rfc.md`。
 
@@ -23,7 +23,7 @@
 
 - **可枚举的状态迁移 → 代码**。"写完一章后派谁"是读事实查表：`flow.Route` 纯函数 + 万级组合穷举规格测试，错误率趋近 0、零 LLM 开销。
 - **边界清晰的语义判断 → LLM 函数（Arbiter）**。选规划师、用户干预分诊、失败/僵局出路：事实进、结构化决策出、机械校验兜底、每次裁定落盘可回放。
-- **开放式创作 → LLM 循环（Worker）**。一章、一次评审、一次规划之内，architect/writer/editor 完全自主。
+- **开放式创作 → LLM 循环（Worker）**。一章、一次逐章润色、一次评审、一次规划之内，architect/writer/reviewer/editor 完全自主。
 
 两平面对称是贯穿性纪律——未来任何新决策点照此形状，不发明新模式：
 
@@ -50,7 +50,7 @@ UI、诊断、事件日志都是从事件流 / 只读工件投影出来的被动
 只有三类事实：
 
 - **Progress** — 进度索引（写到第几章、待重写列表）
-- **Checkpoint** — step 级推进记录（plan / draft / commit / review / arc_summary）
+- **Checkpoint** — step 级推进记录（plan / draft / commit / chapter_review / review / arc_summary）
 - **Artifact** — 章节正文、大纲、角色、摘要等产物
 
 不引入 WorkflowInstance / TaskInstance / Command 等抽象。附属事实（大纲反馈池、机械违规记录、裁定审计）同样是扁平 jsonl，各有唯一生产者与消费者。
@@ -59,9 +59,9 @@ UI、诊断、事件日志都是从事件流 / 只读工件投影出来的被动
 
 **铁律一：工具只返事实，不返跨调度指令**。`commit_chapter` 返回 `arc_end` / `needs_expansion` 等结构化字段；不夹带 `[系统]` 类指令字符串。子代理内的 `next_step` 字段是事实陈述的内联指引（"我刚保存了 plan，下一步是 draft"），不算违反——见 §6.3。
 
-**铁律二：流程路由由 Flow Router 承担，执行由 Engine 承担**。`internal/flow/router.go` 的 `Route(state) → *Instruction` 是纯函数（万级组合穷举规格测试钉死）；Engine 每轮从 store 读事实、Route 推导指令、**直接程序化运行 Worker**（`subagent.Runner.Run`，类型化入参/结果/错误链），无 LLM 工具转发层。返回 nil 表示语义场景（完本收尾/等待干预）或自然停机。**僵局有显式限界**（RFC §5）：上一轮后 Route 仍产生同一 `Agent+Task`，即路由后置条件未满足；3 次咨询 Arbiter、5 次硬熔断暂停。Worker 内部中间 checkpoint 不重置计数，确定性 Engine 不允许无限空转。
+**铁律二：流程路由由 Flow Router 承担，执行由 Engine 承担**。`internal/flow/router.go` 的 `Route(state) → *Instruction` 是纯函数（万级组合穷举规格测试钉死）；Engine 每轮从 store 读事实、Route 推导指令、**直接程序化运行 Worker**（`WorkerRunner.Run`，HTTP 与 Codex CLI 只是任务执行 adapter），无 LLM 工具转发调度层。返回 nil 表示语义场景（完本收尾/等待干预）或自然停机。**僵局有显式限界**（RFC §5）：上一轮后 Route 仍产生同一 `Agent+Task`，即路由后置条件未满足；3 次咨询 Arbiter、5 次硬熔断暂停。Worker 内部中间 checkpoint 不重置计数，确定性 Engine 不允许无限空转。
 
-**铁律三：语义裁定走 Arbiter，每次裁定落盘**。启动选规划师、用户干预分诊、失败/僵局出路由 `internal/arbiter` 的逐场景 Decide 函数裁定：事实进、结构化决策出、机械校验兜底、decisions.jsonl 审计（可离线重放回归）。三个 Worker 保留各自的 `CheckpointDeltaGuard`（事实护栏：产物未落盘不得收工）。
+**铁律三：语义裁定走 Arbiter，每次裁定落盘**。启动选规划师、用户干预分诊、失败/僵局出路由 `internal/arbiter` 的逐场景 Decide 函数裁定：事实进、结构化决策出、机械校验兜底、decisions.jsonl 审计（可离线重放回归）。四个 Worker 保留各自的 `CheckpointDeltaGuard`（事实护栏：产物未落盘不得收工）。
 
 **铁律四：硬编码边界，不硬编码不可枚举的语义判断**。代码只固化可证明的不变量（权限、阶段、顺序、幂等、结构完整性）并向模型提供完整事实与足够的操作空间；创作取舍、质量判断、计划如何适应正文等开放问题必须留给 Worker / Arbiter。禁止用关键词、评分阈值、偏离枚举或规则表代替模型理解，也禁止因担心模型出错而缩窄其合法决策空间。新增代码规则前必须先证明决策空间封闭且结果可机械验证；否则应改善上下文与工具表达能力，让模型升级的收益无需改外壳即可兑现。
 
@@ -77,11 +77,12 @@ UI、诊断、事件日志都是从事件流 / 只读工件投影出来的被动
    ├── engine              确定性循环：LoadState → Route → 前置校验 → 运行 Worker → 哨兵边界
    ├── 干预路径             Steer/Continue → Arbiter 裁定 → 动作执行(即时/边界提交)
    └── usage / 预算 / 停靠点 / 模型管理
-        │ 程序化调用 subagent.Runner.Run（进度经 ctx ToolProgress 中继）
-[architect_short/long · writer · editor]（各自独立 run + context + 模型）
+        │ 程序化调用 WorkerRunner.Run（进度经 ctx ToolProgress 中继）
+[HTTP agentcore loop / isolated Codex CLI task adapter]
+        │ architect_short/long · writer · reviewer · editor（各自独立 run + context + backend）
         │ 工具调用
 [Tools]  novel_context · read_chapter · plan_chapter · draft_chapter · edit_chapter
-         check_consistency · commit_chapter · save_review · save_arc_summary
+         check_consistency · commit_chapter · finalize_reviewed_chapter · save_review · save_arc_summary
          save_volume_summary · save_foundation
         │ 单文件原子 + 幂等重放（commit 使用持久化 Saga）
 [Store: 文件系统 (tmp + rename)]
@@ -117,6 +118,7 @@ type Progress struct {
     ChapterWordCounts map[int]int
     InProgressChapter int             // 正在写作的章节
     Flow              FlowState       // writing / reviewing / rewriting / polishing / steering
+    PendingReviewChapter int          // Writer 已提交、Reviewer 尚未完成的唯一章节
     PendingRewrites   []int
     StrandHistory     []string        // dominant_strand 序列
     HookHistory       []string        // hook_type 序列
@@ -187,6 +189,7 @@ Artifact 在 `store/outline.go` `drafts.go` `summaries.go` `characters.go` `worl
 | `edit_chapter` | drafts/chXX.draft.md | edit |
 | `check_consistency` | 无（只读，inline 返回） | consistency_check |
 | `commit_chapter` | chapters/chXX.md + Progress（+ 反馈池/违规记录 best-effort） | commit |
+| `finalize_reviewed_chapter` | chapters/chXX.md + Progress | chapter_review |
 | `save_review` | reviews/chXX.json（global 为 chXX-global.json） | review |
 | `save_arc_summary` | summaries/arc-vNNaNN.json | arc_summary |
 | `save_volume_summary` | summaries/vol-vNN.json | volume_summary |
@@ -200,8 +203,9 @@ Artifact 在 `store/outline.go` `drafts.go` `summaries.go` `characters.go` `worl
 
 | 错误类型 | 处理层 | 动作 |
 |---|---|---|
-| 网络超时 / 流式 EOF | Tools | 重试 3 次 |
-| provider 429/503 | litellm | failover 到备用 provider |
+| 网络超时 / 流式 EOF | agentcore HTTP adapter | Worker 内按 retry policy 重试 |
+| provider 429/503（HTTP） | Worker task adapter | 无业务副作用时按显式 fallback 切换完整任务 |
+| Codex CLI 超时/非零退出 | Codex task adapter | 终止整个进程组；无业务副作用时才允许任务级 fallback |
 | 鉴权 / 模型不存在 | Tools | terminal 上抛 |
 | 缺前置 artifact | Tools | conflict 上抛，LLM 调 `novel_context` 后重试 |
 | 工具参数非法 | Tools | validation 上抛，LLM 改参数 |
@@ -222,23 +226,25 @@ Artifact 在 `store/outline.go` `drafts.go` `summaries.go` `characters.go` `worl
 
 ### 6.1 装配与运行
 
-`agents.BuildWorkers`（`internal/agents/build.go`）把三类 Worker 装配为一个 `subagent.Runner`：Engine 直接调用 `Run(agent, task)`，每次调用是一个完整的 `agentcore.AgentLoop`（独立 context、独立模型、独立重试）。全部装配一次生效：角色模型 + failover、prompt cache key（每 spawn 自增 #seq）、ThinkingLevel、UsageRecorder/SessionLogger（OnMessage）、Writer ContextManagerFactory（窗口随 /model 切换自动重建）、RestorePack、StopGuardFactory、StopAfterTools。
+`agents.BuildWorkers`（`internal/agents/build.go`）把四类 Worker 装配为一个 `WorkerRunner`。Engine 仍只调用 `Run(agent, task)`；Hybrid runner 在任务边界读取当前角色配置，并把整个任务固定交给 HTTP adapter 或 Codex CLI adapter。HTTP adapter 运行原有 `agentcore.AgentLoop`（独立 context、模型、重试、prompt cache、ContextManager、StopGuard 与 StopAfterTools）；Codex adapter 则启动隔离的 ephemeral `codex exec`，通过该任务独有的 MCP bridge 调用同一组 Go 业务工具。
 
 Worker 进度中继走 **ctx 的 ToolProgress 回调**：Engine 以 `agentcore.WithToolProgress(ctx, relay)` 调 `Runner.Run`，子代理的工具调用/流式正文/thinking/retry/context 事件经 relay 进入 observer——与 Coordinator 时代同一 ProgressPayload 形态，观察层复用。
 
 ```
-Engine ── Runner.Run(agent, task) ──▶ architect_short/long · writer · editor
-                                          │ 工具调用
-                                        Store（协作媒介，Worker 之间不直接通信）
+Engine ── WorkerRunner.Run(agent, task) ──▶ HTTP AgentLoop / Codex CLI task
+                                                   │ 同一组受控业务工具
+                                                 Store（协作媒介）
 ```
 
-`bootstrap.ModelSet` 支持角色级模型：architect/writer/editor 各自独立配置 + provider failover。Writer 跑 Sonnet 而不是 Opus 在 200 章长篇上能省一个数量级成本。Arbiter 统一使用 Default 模型（经 usageTrackedModel 计费），当前不开放独立角色配置。
+`bootstrap.ModelSet` 支持角色级模型：arbiter/architect/writer/reviewer/editor 各自独立配置与显式 fallback；未配置角色继承 Default。Arbiter 通过动态角色模型在每个调用边界解析当前选择，因此 `/model` 热切换无需重建 Host。HTTP Worker 的 fallback 和 Codex/HTTP 跨 backend fallback 都按完整任务处理：只有尚未成功执行非只读业务工具时才透明切换；已有副作用则返回 Engine，让下一轮从 Store/Checkpoint 事实恢复，禁止拼接两个 backend 的半截会话。
+
+Codex CLI backend 位于 `internal/codexcli`：只支持 macOS，本地配置只复用 `auth.json`；每次任务使用临时 `CODEX_HOME`、空 cwd、read-only sandbox、忽略用户 config/rules，并禁用原生工具。Worker 的 MCP server 注册静态角色 allowlist，工具执行仍发生在父进程，终态工具成功后锁住后续写操作。成功条件是终态业务工具产生的新 checkpoint；CLI 的退出码或 final text 不能单独证明任务完成。Arbiter与其他单次调用不注入 MCP，只使用 JSON Schema 输出和现有业务校验。
 
 ### 6.2 三类协作模式
 
 Worker 之间不直接通信，所有信息流经 Store 中的结构化工件：
 
-**模式 A · 串行移交（主干）**：Route 派 Architect 规划 → Writer 章 1..N → Editor 弧末评审 → Writer 重写。每一步"下一个派谁"由 Route 从事实推导。
+**模式 A · 串行移交（主干）**：Route 派 Architect 规划 → Writer 提交一章 → Reviewer（Humanizer 检测/按需改写 → 台词情绪优化）→ 下一章 Writer 或弧末 Editor → Writer 重写。每一步“下一个派谁”由 Route 从事实推导；返工提交同样必须再次经过 Reviewer。
 
 **模式 B · 反馈闭环**：Writer 在 commit 中报告大纲偏离 → 反馈池落盘（仅分层书）→ Architect 下次结构操作经 novel_context 参考 → 操作成功即消费清空。Writer 不直接呼叫 Architect，反馈经事实层流转。
 
@@ -252,8 +258,8 @@ Worker 之间不直接通信，所有信息流经 Store 中的结构化工件：
 
 | 层 | 落点 | 作用 |
 |---|---|---|
-| `StopAfterTools` / `StopAfterToolResult` | `agents/build.go` SubAgentConfig | 关键工具成功即退出 Worker run（终态退出仍咨询 StopGuard，见契约测试）。Writer `commit_chapter` 命中即停；Editor 的 `save_review`/`save_arc_summary`/`save_volume_summary`、Architect 弧/卷收尾走 `StopAfterToolResult` |
-| `CheckpointDeltaGuard` | `agents/guard/subagent_guards.go` | 以 baseline checkpoint 为分界，本轮结束前必须看到对应 step 的新 checkpoint，否则拒绝 `end_turn`；连续拦 3 次升级 terminate（弱模型死循环兜底）。Editor 的 guard 任务感知：被派生成摘要时仅复核不算完成 |
+| `StopAfterTools` / `StopAfterToolResult` | `agents/build.go` SubAgentConfig | 关键工具成功即退出 Worker run（终态退出仍咨询 StopGuard，见契约测试）。Writer `commit_chapter`、Reviewer `finalize_reviewed_chapter` 命中即停；Editor 的 `save_review`/`save_arc_summary`/`save_volume_summary`、Architect 弧/卷收尾走 `StopAfterToolResult` |
+| `CheckpointDeltaGuard` | `agents/guard/subagent_guards.go` | 以 baseline checkpoint 为分界，本轮结束前必须看到对应 step 的新 checkpoint，否则拒绝 `end_turn`；连续拦 3 次升级 terminate（弱模型死循环兜底）。Reviewer 必须落 `chapter_review`；Editor 的 guard 任务感知：被派生成摘要时仅复核不算完成 |
 | 工具内联 `next_step` | 各工具返回值字段 | 每个事实自带"下一步建议"，LLM 看到事实就知道下一步 |
 | 工具内归属/前置检查 | `edit_chapter` `commit_chapter` 等 | 数据层物理拦截：初稿定点编辑、改未入队的已完成章、空提交均被拒，`ConcurrencySafe=false` 阻止并发竞态 |
 
@@ -261,7 +267,7 @@ writer.md 只承担：执行协议、断点续跑认知模型、章节契约解�
 
 ### 6.4 agentcore 依赖
 
-`../agentcore` 是本项目自有的通用 Agent 库（go.work 关联）。Engine 用到的原语：`subagent.Runner.Run`（程序化直调，类型化结果与错误链——`errors.Is(err, subagent.ErrUnknownAgent)` 等分类不依赖错误文案）、ctx `ToolProgress`（事件中继）、`subagent.Config`、`StopGuard`/`StopAfterTools`。`subagent.Tool` 只供需要把 Runner 暴露给模型的宿主通过 `Runner.AsTool()` 使用，AINovel 不经过这层。
+`../agentcore` 是本项目自有的通用 Agent 库（go.work 关联）。HTTP adapter 用到的原语：`subagent.Runner.Run`（程序化直调，类型化结果与错误链——`errors.Is(err, subagent.ErrUnknownAgent)` 等分类不依赖错误文案）、ctx `ToolProgress`（事件中继）、`subagent.Config`、`StopGuard`/`StopAfterTools`。`subagent.Tool` 只供需要把 Runner 暴露给模型的宿主通过 `Runner.AsTool()` 使用，AINovel 不经过这层。Codex CLI 是完整自治 runtime，因此它位于应用侧 `WorkerRunner` adapter，而不是伪装成通用 `agentcore.ChatModel`；只有 Arbiter等无工具单次调用使用薄 completion adapter。
 
 **修改边界**：可进 agentcore——新 ContextManager 策略、新 provider 适配、新事件类型；不进 agentcore——业务模型与业务工具。判断准则：假设 agentcore 未来会被 coding agent / 客服 agent 引入，新能力在那个场景仍有意义才允许进。**禁止在应用层写兜底补丁**——缺能力直接改上游。
 
@@ -295,7 +301,7 @@ for {
                                   // writer 目标章未展开 → 改派 architect 展开
     advanceGate.Allow(inst)       // 仅阻断未获许可的正向新章
     trackDeadlock(inst)           // 同一 Agent+Task 连续重现:3 次问 Arbiter,5 次熔断
-    runWorker(inst)               // subagent.Runner.Run + 进度中继 + DISPATCH 事件
+    runWorker(inst)               // WorkerRunner.Run + 进度中继 + DISPATCH 事件
     错误分类:确定性错误→暂停;首败重试一次;再败→Arbiter(retry/reroute/abort)
     政策边界:budget → advanceGate
 }
@@ -374,7 +380,7 @@ User: "一句话需求"
 | `AdvanceMode=review` + 精确 permit | `/review on`、`/next` | 持久政策：每个正向新章必须单独放行 |
 | `AdvanceHold` | Arbiter intervention | 一次性意图：当前边界或返工排空后暂停 |
 
-许可绑定章节号。只有目标章进入 CompletedChapters、PendingCommit 清空且 commit checkpoint 存在才消费，因此提交 saga 任一窗口崩溃都不会把同一许可用于下一章。详细不变量见 [Chapter Advance Gate](chapter-advance-gate.md)。
+许可绑定章节号。目标章进入 CompletedChapters、PendingCommit 清空且 commit checkpoint 存在后消费写作许可，但 Engine 仍会放行该章 Reviewer；只有 `PendingReviewChapter` 清零后才停在下一章之前。因此提交或 Reviewer 任一窗口崩溃，都不会把半成品暴露为逐章验收结果。详细不变量见 [Chapter Advance Gate](chapter-advance-gate.md)。
 
 ---
 
@@ -387,25 +393,26 @@ internal/
   store/          文件系统持久化（tmp+rename + 幂等协调；commit 有 Saga 阶段事实）：progress / checkpoints / outline /
                   drafts / summaries / characters / world / signals / run_meta / runtime /
                   session / decisions(裁定审计)
-  tools/          11 个 Agent 工具，写类单文件原子 + 显式错误 + 幂等；commit 额外使用持久化 Saga
+  tools/          Agent 工具，写类单文件原子 + 显式错误 + 幂等；commit 额外使用持久化 Saga
   flow/           路由策略（纯函数 + IO 边界）：router.go (Route 决策表) + state.go (LoadState)
                   + pause.go (停靠点裁定)
   arbiter/        语义裁定层（LLM-as-function）：plan_start / intervention / failure(deadlock)
                   逐场景 Collect/Decide 函数对 + 逐场景 Decision 类型 + 机械校验
-  agents/         build.go 装配三个 Worker(subagent.Runner,Engine 程序化直调)；ctxpack/ Writer 上下文压缩策略
-    guard/        subagent_guards.go (CheckpointDeltaGuard ×3,Worker 事实护栏)
+  agents/         build.go 装配四个 Worker + Hybrid WorkerRunner；codex_worker.go 任务级 backend/fallback
+    guard/        subagent_guards.go (CheckpointDeltaGuard ×4,Worker 事实护栏)
   host/           host.go (生命周期/干预编排) + engine.go (确定性执行循环) + observer*.go
                   + events.go + usage*.go + budget.go + advance_gate.go + resume.go + cocreate.go
     imp/          外部小说语义编译导入：ingest → segment → analyze → synthesize → publish（纯状态推导 + LLM 作函数）
     exp/          已完成章节导出：TXT / EPUB 3；纯只读
   entry/          tui (Bubble Tea) / headless / startup
-  bootstrap/      config + ModelSet + provider failover + setup 向导
+  bootstrap/      config + ModelSet + provider/backend 选择 + Codex preflight + setup 向导
+  codexcli/       隔离进程 runtime + 单次 completion adapter + 每任务私有 MCP bridge
   eval/           离线评测（prompt/voice A/B、回归）
   diag/ errs/ models/ notify/ rules/ userrules/ stylestat/ ...
 
 assets/
   prompts/        arbiter-plan-start / arbiter-intervention / arbiter-failure / architect-short|long
-                  / writer(协议模板,{{VOICE}} 占位) / editor / import-* / simulation-*
+                  / writer(协议模板,{{VOICE}} 占位) / reviewer / editor / import-* / simulation-*
   voice.md        写作标准(文风层内置默认;三层覆盖见 docs/voice-layer.md)
   references/     写作技巧 + anti-ai-tone + 体裁模板等
   styles/         默认/奇幻/言情/悬疑(用户可覆盖/新增)
@@ -424,6 +431,8 @@ assets/
 | 2026-06-05 | 滚动规划闭环 + `/import` 反推续写 | 200+ 章首次跑通 |
 | 2026-07-12 | **Engine + Arbiter 控制面更替**：Coordinator 长循环及七项补丁生态退役；文风层三层覆盖；五轮对抗评审加固 | 每边界省一次 LLM 转发；控制面 100% 离线可测；语义裁定可回放 |
 | 2026-07-15 | **`/import` 语义编译管线**：硬编码切分规则退役，改为 ingest→segment→analyze→synthesize→publish 分阶段编译；纯状态推导（`NextAction(Facts)`）+ 输入指纹绑定工件，全程可恢复幂等 | 切分随模型能力自然增强；无漂移阶段枚举；中断可续、控制面离线可测 |
+| 2026-08-10 | **本机 Codex CLI backend**：saved login 驱动 Arbiter/Architect/Writer/Editor；隔离进程 + 每任务私有 MCP + 完整任务级 fallback | 无 API Key 复用本机 Codex；Engine/Store 工具契约与恢复语义保持不变 |
+| 2026-08-20 | **逐章 Reviewer 质量闸**：Writer 提交后固定 Humanizer 检测/按需改写 → 台词情绪优化；来源摘要、改写边界、排版和 5% 增幅由工具校验 | 下一章或 Editor 前必经逐章润色；无 AI 痕迹不做无效 Humanizer 改写；HTTP/Codex 均可运行 |
 
 实测：hy3-preview free 12 章 / 73 分钟、mimo-v2.5-pro 10 章 / 8.4 万字，均一次跑完；长篇 gpt-5.4《凡骨》235 章 / 127 万字滚动规划闭环跑通（Coordinator 时代数据，Engine 时代首跑待补）。
 
@@ -497,10 +506,10 @@ assets/
 - 一个串行确定性 Engine 循环（~500 行，六条端到端路径钉死）
 - 一张 Route 决策表（纯函数，12 万组合穷举规格）
 - 四个 Arbiter 裁定函数（事实进、结构化决策出、落盘可回放）
-- 三类职能 Worker（context 与模型独立，事实护栏零打扰）
-- 11 个单文件原子、跨文件显式失败/幂等恢复的工具；其中 commit 使用持久化 Saga + 一个 jsonl checkpoint 文件
+- 四类职能 Worker（context 与模型独立，事实护栏零打扰）
+- 一组单文件原子、跨文件显式失败/幂等恢复的工具；其中 commit 使用持久化 Saga + 一个 jsonl checkpoint 文件
 
-模型升级的收益流向何处一目了然：创作更好（Writer/Architect/Editor 的全部输出）、裁定更准（Arbiter 四场景）、摘要更好（ctxpack）——全部换模型即得，外壳一行不改。控制面不吃模型红利，因为**查表不需要智力**；它需要的是被证明正确，而它已经被证明了。
+模型升级的收益流向何处一目了然：创作更好（Writer/Architect/Reviewer/Editor 的全部输出）、裁定更准（Arbiter 四场景）、摘要更好（ctxpack）——全部换模型即得，外壳一行不改。控制面不吃模型红利，因为**查表不需要智力**；它需要的是被证明正确，而它已经被证明了。
 
 流程刚性是有意的、标了价的、留了门的：想放开 writer 的工具顺序 → 松一段协议 prompt（不变量在工具层兜底）；想按弧派发 → Route 加一行分支；想扩裁定能力 → 加一对 Collect/Decide。每一次松绑都有裁判（穷举规格、文风评测、decisions 回放）——**用证据决定给模型多少绳子，而不是用信仰**。
 

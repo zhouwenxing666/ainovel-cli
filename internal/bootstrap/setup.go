@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	_ "embed"
 	"fmt"
 	"os"
@@ -38,6 +39,8 @@ type setupProvider struct {
 	baseURL        string // 预填的 base_url
 	needType       bool   // 自定义代理需要额外问 type 和 base_url
 	apiKeyOptional bool   // true 表示 API Key 允许留空
+	driver         string // codex_cli 等非 HTTP backend
+	defaultModel   string // 新增 provider 时预置的产品默认模型
 }
 
 // ProviderPreset 是首次引导和运行时 /config 共用的 provider 目录项。
@@ -47,6 +50,8 @@ type ProviderPreset struct {
 	BaseURL        string
 	NeedType       bool
 	APIKeyOptional bool
+	Driver         string
+	DefaultModel   string
 }
 
 var setupProviders = []setupProvider{
@@ -60,6 +65,7 @@ var setupProviders = []setupProvider{
 	{name: "grok", label: "Grok"},
 	{name: "ollama", label: "Ollama", baseURL: "http://localhost:11434/v1", apiKeyOptional: true},
 	{name: "bedrock", label: "Bedrock", apiKeyOptional: true},
+	{name: "local-codex", label: "Local Codex CLI (macOS)", apiKeyOptional: true, driver: "codex_cli", defaultModel: DefaultCodexModel},
 	{name: "custom", label: "Custom Proxy", needType: true, apiKeyOptional: true},
 }
 
@@ -69,7 +75,8 @@ func ProviderPresets() []ProviderPreset {
 	for _, preset := range setupProviders {
 		out = append(out, ProviderPreset{
 			Name: preset.name, Label: preset.label, BaseURL: preset.baseURL,
-			NeedType: preset.needType, APIKeyOptional: preset.apiKeyOptional,
+			NeedType: preset.needType, APIKeyOptional: preset.apiKeyOptional, Driver: preset.driver,
+			DefaultModel: preset.defaultModel,
 		})
 	}
 	return out
@@ -93,6 +100,7 @@ func RunSetup() (Config, error) {
 	providerName := sp.name
 	var pc ProviderConfig
 	printStepDone("Provider", sp.label)
+	pc.Driver = sp.driver
 
 	// 自定义代理：额外问名称和 API 协议类型
 	if sp.needType {
@@ -105,6 +113,43 @@ func RunSetup() (Config, error) {
 			return Config{}, err
 		}
 		pc.Type = providerType
+	}
+
+	if pc.IsCodexCLI() {
+		pc.Command, err = runTextInputWithDefault("[2/3] Codex CLI 命令", "codex", "codex")
+		if err != nil {
+			return Config{}, err
+		}
+		printStepDone("Command", pc.Command)
+		pc.CodexHome, err = runOptionalTextInput("[3/3] CODEX_HOME（留空使用 ~/.codex）", "例如 /Users/you/.codex")
+		if err != nil {
+			return Config{}, err
+		}
+		if pc.CodexHome == "" {
+			printStepDone("CODEX_HOME", "~/.codex")
+		} else {
+			printStepDone("CODEX_HOME", pc.CodexHome)
+		}
+		cfg := NewDefaultCodexConfig(providerName, pc)
+		modelName := cfg.ModelName
+		printStepDone("Model", modelName)
+		printStepDone("Reasoning", cfg.ReasoningEffort)
+		if err := cfg.ValidateBase(); err != nil {
+			return Config{}, err
+		}
+		if err := PreflightCodexProvider(context.Background(), providerName, cfg.Providers[providerName]); err != nil {
+			return Config{}, err
+		}
+		path := DefaultConfigPath()
+		if err := SaveConfig(path, cfg); err != nil {
+			return cfg, fmt.Errorf("save config: %w", err)
+		}
+		saveExampleConfig()
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "%s 配置已保存到 %s\n",
+			lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("✓"), path)
+		fmt.Fprintf(os.Stderr, "  默认模型：%s；推理强度：%s（本机 Codex CLI）\n\n", modelName, cfg.ReasoningEffort)
+		return cfg, nil
 	}
 
 	// Step 2: 输入 API Key

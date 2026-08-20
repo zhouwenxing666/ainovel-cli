@@ -242,6 +242,28 @@ func TestValidateJSONEnforcesStrictContract(t *testing.T) {
 	}
 }
 
+func TestValidateJSONAllowsFreeFormSchemaNodes(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"content": map[string]any{"description": "free-form JSON"},
+			"items":   map[string]any{"type": "array"},
+		},
+		"required": []string{"content", "items"},
+	}
+	for name, raw := range map[string]string{
+		"object and unconstrained array": `{"content":{"title":"arc"},"items":[1,"two",{"three":3}]}`,
+		"scalar":                         `{"content":"markdown","items":[]}`,
+		"null":                           `{"content":null,"items":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateJSON(schema, []byte(raw)); err != nil {
+				t.Fatalf("free-form JSON Schema node was rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateJSONRejectsInvalidEnumContract(t *testing.T) {
 	contract := testContract()
 	contract.Schema["enum"] = []any{1}

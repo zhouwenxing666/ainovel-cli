@@ -55,9 +55,26 @@ func TestRenderStatusBarAutoThinkingAndEmpty(t *testing.T) {
 }
 
 func TestRenderUsageLineSeparatesFullWidthNameAndTokens(t *testing.T) {
-	out := renderUsageLine("gpt-5.6-sol", bodyTextColor, 5300, 0, 0.23, 32)
+	out := renderUsageLine("gpt-5.6-sol", bodyTextColor, 5300, 0, 0.23, false, 32)
 	if !strings.Contains(out, "gpt-5.6-sol 5.3k") {
 		t.Fatalf("model name and tokens should have a visible gap: %q", out)
+	}
+}
+
+func TestRenderStatusAndUsageShowCodexCostAsUnavailable(t *testing.T) {
+	status := ansi.Strip(renderStatusBar(host.UISnapshot{
+		Provider: "local-codex", ModelName: "gpt-5.4",
+		TotalInputTokens: 1000, TotalOutputTokens: 200, CostUnavailable: true,
+	}, "", 120))
+	if !strings.Contains(status, "N/A") || strings.Contains(status, "$0") {
+		t.Fatalf("saved-login cost must be explicit N/A: %q", status)
+	}
+	line := ansi.Strip(renderUsageLine("gpt-5.4", bodyTextColor, 1000, 200, 0, true, 32))
+	if !strings.Contains(line, "N/A") {
+		t.Fatalf("per-model saved-login cost must be explicit N/A: %q", line)
+	}
+	if mixed := formatUsageCost(0.31, true); mixed != "$0.31 + N/A" {
+		t.Fatalf("mixed HTTP/Codex cost label = %q", mixed)
 	}
 }
 

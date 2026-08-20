@@ -37,7 +37,7 @@ const (
 //   - 注册表无此模型时，退回 msg.Usage.Cost.Total（provider 自带，可能为 0）
 //   - 模型热切换（/model）后续消息自动按新模型算价，旧消息保留旧成本
 //
-// 同时维护 per-role 维度（writer/editor/architect）：
+// 同时维护 per-role 维度（writer/reviewer/editor/architect）：
 //   - 累计命中数据 → 整体优化效果
 //   - 滑动窗最近 N 次 → 区分前期拖累 vs 稳态低命中
 //   - CacheCapable 标记 → 区分"未启用"和"真的 0% 命中"
@@ -110,9 +110,12 @@ type agentTotals struct {
 	Cost         float64
 	Saved        float64
 	CacheCapable bool
-	CacheBreaks  int // live 检测到的缓存链断裂次数（replay 不计）
-	samples      []usageSample
-	sampleIdx    int
+	// CostUnavailable marks aggregates containing saved-login Codex calls.
+	// Cost may still contain the priced HTTP portion of a mixed aggregate.
+	CostUnavailable bool
+	CacheBreaks     int // live 检测到的缓存链断裂次数（replay 不计）
+	samples         []usageSample
+	sampleIdx       int
 }
 
 func NewUsageTracker(set *bootstrap.ModelSet, store *storepkg.Store) *UsageTracker {
@@ -258,16 +261,24 @@ func (t *UsageTracker) notifyDirty() {
 func (t *UsageTracker) accumulate(role, provider, modelName string, u agentcore.Usage) {
 	provider, modelName = t.effectiveModel(role, provider, modelName)
 	cost, saved, capable := t.resolveCost(modelName, u)
+	costUnavailable := t.costUnavailable(provider)
+	if costUnavailable {
+		// Session replay can recover provider identity from record metadata even
+		// when older Usage payloads did not carry Usage.Provider. The effective
+		// provider is authoritative: never let a model-registry price leak onto a
+		// saved-login Codex call.
+		cost, saved, capable = 0, 0, false
+	}
 
 	t.mu.Lock()
-	addUsage(&t.overall, u, cost, saved, capable)
+	addUsage(&t.overall, u, cost, saved, capable, costUnavailable)
 
 	per := t.perAgent[role]
 	if per == nil {
 		per = &agentTotals{}
 		t.perAgent[role] = per
 	}
-	addUsage(per, u, cost, saved, capable)
+	addUsage(per, u, cost, saved, capable, costUnavailable)
 
 	if key := modelUsageKey(provider, modelName); key != "" {
 		perModel := t.perModel[key]
@@ -275,7 +286,7 @@ func (t *UsageTracker) accumulate(role, provider, modelName string, u agentcore.
 			perModel = &agentTotals{}
 			t.perModel[key] = perModel
 		}
-		addUsage(perModel, u, cost, saved, capable)
+		addUsage(perModel, u, cost, saved, capable, costUnavailable)
 	}
 	total := t.overall.Cost
 	t.mu.Unlock()
@@ -284,6 +295,14 @@ func (t *UsageTracker) accumulate(role, provider, modelName string, u agentcore.
 	if t.onCost != nil {
 		t.onCost(total)
 	}
+}
+
+func (t *UsageTracker) costUnavailable(provider string) bool {
+	if t == nil || t.modelSet == nil || strings.TrimSpace(provider) == "" {
+		return false
+	}
+	configured, ok := t.modelSet.ConfigSnapshot().Providers[provider]
+	return ok && configured.IsCodexCLI()
 }
 
 // SetOnCost 注册记账回调（携带最新累计成本，锁外调用）。
@@ -334,7 +353,7 @@ func modelUsageKey(provider, modelName string) string {
 // 上游确实做了 prompt caching。注册表的 CacheReadCostPer1M 仅作 fallback，
 // 因为自建 backend 模型（mimo-v2.5-pro / 国内代理等）通常不在 BerriAI/litellm
 // pricing 索引里，但实际 Usage 里完全有 cache 数据，UI 不该误判为"未启用"。
-func addUsage(t *agentTotals, u agentcore.Usage, cost, saved float64, capable bool) {
+func addUsage(t *agentTotals, u agentcore.Usage, cost, saved float64, capable, costUnavailable bool) {
 	t.Input += u.Input
 	t.Output += u.Output
 	t.CacheRead += u.CacheRead
@@ -343,6 +362,9 @@ func addUsage(t *agentTotals, u agentcore.Usage, cost, saved float64, capable bo
 	t.Saved += saved
 	if capable || u.CacheRead > 0 || u.CacheWrite > 0 {
 		t.CacheCapable = true
+	}
+	if costUnavailable {
+		t.CostUnavailable = true
 	}
 	pushSample(t, u.CacheRead, u.Input)
 }
@@ -386,6 +408,18 @@ func (t *UsageTracker) SavedUSD() float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.overall.Saved
+}
+
+// CostUnavailable reports whether the aggregate includes at least one call
+// whose API-dollar price is intentionally unknown (currently local Codex CLI
+// saved-login usage). Total cost remains useful as the priced HTTP portion.
+func (t *UsageTracker) CostUnavailable() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.overall.CostUnavailable
 }
 
 // OverallRecent 返回滑动窗内（≤ recentSampleCap 次）的 cacheRead 总和、input 总和、样本数。
@@ -592,14 +626,15 @@ func totalsSnapshot(t *agentTotals) domain.AgentUsageTotals {
 		return domain.AgentUsageTotals{}
 	}
 	return domain.AgentUsageTotals{
-		Input:        t.Input,
-		Output:       t.Output,
-		CacheRead:    t.CacheRead,
-		CacheWrite:   t.CacheWrite,
-		Cost:         t.Cost,
-		Saved:        t.Saved,
-		CacheCapable: t.CacheCapable,
-		CacheBreaks:  t.CacheBreaks,
+		Input:           t.Input,
+		Output:          t.Output,
+		CacheRead:       t.CacheRead,
+		CacheWrite:      t.CacheWrite,
+		Cost:            t.Cost,
+		Saved:           t.Saved,
+		CacheCapable:    t.CacheCapable,
+		CostUnavailable: t.CostUnavailable,
+		CacheBreaks:     t.CacheBreaks,
 	}
 }
 
@@ -607,14 +642,15 @@ func totalsSnapshot(t *agentTotals) domain.AgentUsageTotals {
 // 重新从 0 开始积累，几轮 Record 后即可恢复"近 N 次命中率"语义。
 func totalsFromState(s domain.AgentUsageTotals) agentTotals {
 	return agentTotals{
-		Input:        s.Input,
-		Output:       s.Output,
-		CacheRead:    s.CacheRead,
-		CacheWrite:   s.CacheWrite,
-		Cost:         s.Cost,
-		Saved:        s.Saved,
-		CacheCapable: s.CacheCapable,
-		CacheBreaks:  s.CacheBreaks,
+		Input:           s.Input,
+		Output:          s.Output,
+		CacheRead:       s.CacheRead,
+		CacheWrite:      s.CacheWrite,
+		Cost:            s.Cost,
+		Saved:           s.Saved,
+		CacheCapable:    s.CacheCapable,
+		CostUnavailable: s.CostUnavailable,
+		CacheBreaks:     s.CacheBreaks,
 	}
 }
 
@@ -629,6 +665,7 @@ type AgentUsage struct {
 	Cost            float64
 	Saved           float64
 	CacheCapable    bool
+	CostUnavailable bool
 	RecentCacheRead int
 	RecentInput     int
 	RecentSamples   int
@@ -656,6 +693,7 @@ func (t *UsageTracker) PerAgent() []AgentUsage {
 			Cost:            v.Cost,
 			Saved:           v.Saved,
 			CacheCapable:    v.CacheCapable,
+			CostUnavailable: v.CostUnavailable,
 			RecentCacheRead: recentRead,
 			RecentInput:     recentInput,
 			RecentSamples:   len(v.samples),
@@ -683,14 +721,15 @@ func (t *UsageTracker) PerModel() []AgentUsage {
 			continue
 		}
 		out = append(out, AgentUsage{
-			Model:        model,
-			Input:        v.Input,
-			Output:       v.Output,
-			CacheRead:    v.CacheRead,
-			CacheWrite:   v.CacheWrite,
-			Cost:         v.Cost,
-			Saved:        v.Saved,
-			CacheCapable: v.CacheCapable,
+			Model:           model,
+			Input:           v.Input,
+			Output:          v.Output,
+			CacheRead:       v.CacheRead,
+			CacheWrite:      v.CacheWrite,
+			Cost:            v.Cost,
+			Saved:           v.Saved,
+			CacheCapable:    v.CacheCapable,
+			CostUnavailable: v.CostUnavailable,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -709,6 +748,13 @@ func (t *UsageTracker) PerModel() []AgentUsage {
 //
 // modelName 优先用调用方传入的（replay 时来自 session jsonl 的 _meta.model）。
 func (t *UsageTracker) resolveCost(modelName string, u agentcore.Usage) (cost, saved float64, capable bool) {
+	if t.modelSet != nil && u.Provider != "" {
+		if provider, ok := t.modelSet.ConfigSnapshot().Providers[u.Provider]; ok && provider.IsCodexCLI() {
+			// Saved-login Codex usage is subscription telemetry, not an API bill.
+			// Never apply registry per-token prices to it.
+			return 0, 0, false
+		}
+	}
 	if entry, ok := models.DefaultRegistry().Resolve(modelName); ok {
 		c := computeCost(u, *entry)
 		s := computeSaved(u, *entry)

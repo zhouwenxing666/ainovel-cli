@@ -9,6 +9,24 @@ import (
 	"github.com/voocel/ainovel-cli/internal/notify"
 )
 
+func TestNewDefaultCodexConfigUsesProductDefaults(t *testing.T) {
+	cfg := NewDefaultCodexConfig("local-codex", ProviderConfig{
+		Driver:  "codex_cli",
+		Command: "codex",
+	})
+
+	if cfg.ModelName != "gpt-5.6-sol" {
+		t.Fatalf("default Codex model = %q, want gpt-5.6-sol", cfg.ModelName)
+	}
+	if cfg.ReasoningEffort != "xhigh" {
+		t.Fatalf("default Codex reasoning effort = %q, want xhigh", cfg.ReasoningEffort)
+	}
+	models := cfg.Providers["local-codex"].Models
+	if len(models) != 1 || models[0].Name != "gpt-5.6-sol" {
+		t.Fatalf("default Codex models = %#v, want gpt-5.6-sol", models)
+	}
+}
+
 func TestConfigResolveReasoningEffort(t *testing.T) {
 	cfg := Config{
 		ReasoningEffort: "low", // 顶层默认
@@ -46,27 +64,107 @@ func TestConfigResolveReasoningEffort(t *testing.T) {
 }
 
 func TestValidateBaseRejectsNonConfigurableRoles(t *testing.T) {
-	for _, role := range []string{"coordinator", "arbiter"} {
-		t.Run(role, func(t *testing.T) {
-			cfg := Config{
-				Provider:  "openrouter",
-				ModelName: "test-model",
-				Providers: map[string]ProviderConfig{
-					"openrouter": {APIKey: "sk-test-123456"},
-				},
-				Roles: map[string]RoleConfig{
-					role: {Provider: "openrouter", Model: "test-model"},
-				},
-			}
+	cfg := Config{
+		Provider:  "openrouter",
+		ModelName: "test-model",
+		Providers: map[string]ProviderConfig{
+			"openrouter": {APIKey: "sk-test-123456"},
+		},
+		Roles: map[string]RoleConfig{
+			"coordinator": {Provider: "openrouter", Model: "test-model"},
+		},
+	}
 
-			err := cfg.ValidateBase()
-			if err == nil {
-				t.Fatalf("roles.%s 应被拒绝", role)
-			}
-			if !errors.Is(err, errs.ErrConfig) {
-				t.Fatalf("应包装 errs.ErrConfig，得到: %v", err)
-			}
-		})
+	err := cfg.ValidateBase()
+	if err == nil {
+		t.Fatal("roles.coordinator 应被拒绝")
+	}
+	if !errors.Is(err, errs.ErrConfig) {
+		t.Fatalf("应包装 errs.ErrConfig，得到: %v", err)
+	}
+}
+
+func TestValidateBaseAcceptsCodexCLIAndArbiterRole(t *testing.T) {
+	cfg := Config{
+		Provider:  "local-codex",
+		ModelName: "gpt-5.3-codex",
+		Providers: map[string]ProviderConfig{
+			"local-codex": {
+				Driver:  "codex_cli",
+				Command: "/opt/homebrew/bin/codex",
+			},
+		},
+		Roles: map[string]RoleConfig{
+			"arbiter": {
+				Provider: "local-codex",
+				Model:    "gpt-5.3-codex",
+			},
+		},
+	}
+
+	if err := cfg.ValidateBase(); err != nil {
+		t.Fatalf("codex_cli 不应要求 api_key，且 roles.arbiter 应合法: %v", err)
+	}
+}
+
+func TestCodexCLIProviderTimeoutsAndValidation(t *testing.T) {
+	pc := ProviderConfig{Driver: "codex_cli", Command: "codex"}
+	if got, err := pc.SingleCallTimeoutValue(); err != nil || got != 3*time.Minute {
+		t.Fatalf("single-call default = (%v, %v), want 3m", got, err)
+	}
+	if got, err := pc.WorkerTimeoutValue(); err != nil || got != 30*time.Minute {
+		t.Fatalf("worker default = (%v, %v), want 30m", got, err)
+	}
+
+	pc.SingleCallTimeout = "45s"
+	pc.WorkerTimeout = "12m"
+	if got, err := pc.SingleCallTimeoutValue(); err != nil || got != 45*time.Second {
+		t.Fatalf("single-call override = (%v, %v), want 45s", got, err)
+	}
+	if got, err := pc.WorkerTimeoutValue(); err != nil || got != 12*time.Minute {
+		t.Fatalf("worker override = (%v, %v), want 12m", got, err)
+	}
+
+	invalid := []ProviderConfig{
+		{Driver: "shell", Command: "codex"},
+		{Driver: "codex_cli"},
+		{Driver: "codex_cli", Command: "codex", APIKey: "must-not-be-used"},
+		{Driver: "codex_cli", Command: "codex", BaseURL: "https://example.com"},
+		{Driver: "codex_cli", Command: "codex", Extra: map[string]any{"env": "unsafe"}},
+		{Driver: "codex_cli", Command: "codex", SingleCallTimeout: "soon"},
+		{Driver: "codex_cli", Command: "codex", WorkerTimeout: "0"},
+		{Driver: "codex_cli", Command: "./codex"},
+		{Driver: "codex_cli", Command: "codex", CodexHome: ".codex"},
+	}
+	for i, provider := range invalid {
+		cfg := Config{
+			Provider:  "local",
+			ModelName: "gpt-5.3-codex",
+			Providers: map[string]ProviderConfig{"local": provider},
+		}
+		if err := cfg.ValidateBase(); !errors.Is(err, errs.ErrConfig) {
+			t.Errorf("invalid provider[%d] 应返回配置错误，得到 %v", i, err)
+		}
+	}
+}
+
+func TestValidateBaseAcceptsRoleTimeout(t *testing.T) {
+	cfg := Config{
+		Provider:  "local",
+		ModelName: "gpt-5.3-codex",
+		Providers: map[string]ProviderConfig{
+			"local": {Driver: "codex_cli", Command: "codex"},
+		},
+		Roles: map[string]RoleConfig{
+			"writer": {Provider: "local", Model: "gpt-5.3-codex", Timeout: "20m"},
+		},
+	}
+	if err := cfg.ValidateBase(); err != nil {
+		t.Fatalf("合法 role timeout 应通过: %v", err)
+	}
+	cfg.Roles["writer"] = RoleConfig{Provider: "local", Model: "gpt-5.3-codex", Timeout: "forever"}
+	if err := cfg.ValidateBase(); !errors.Is(err, errs.ErrConfig) {
+		t.Fatalf("非法 role timeout 应返回配置错误，得到 %v", err)
 	}
 }
 

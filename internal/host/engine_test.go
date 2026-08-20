@@ -8,6 +8,8 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -169,6 +171,26 @@ func (m *providerNetworkModel) GenerateStream(context.Context, []agentcore.Messa
 
 func (m *providerNetworkModel) SupportsTools() bool { return true }
 
+// contextBlockingModel 在收到取消前不返回，用于把“干预已入队、Worker 仍在途”的
+// 退出竞态测试变成确定性时序。
+type contextBlockingModel struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (m *contextBlockingModel) Generate(ctx context.Context, _ []agentcore.Message, _ []agentcore.ToolSpec, _ ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
+	m.once.Do(func() { close(m.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (m *contextBlockingModel) GenerateStream(ctx context.Context, msgs []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error) {
+	_, err := m.Generate(ctx, msgs, tools, opts...)
+	return nil, err
+}
+
+func (m *contextBlockingModel) SupportsTools() bool { return true }
+
 func testToolCallMsg(name string, args any) agentcore.Message {
 	data, _ := json.Marshal(args)
 	return agentcore.Message{
@@ -229,6 +251,37 @@ func scriptedWriterModel() *scriptedChatModel {
 			})
 		}
 	}}
+}
+
+// testReviewerConfig 用真实 finalize 工具消费 Writer 留下的待审章节。
+// 测试正文没有台词，也没有刻意植入 AI 痕迹，因此走“Humanizer 无发现，
+// 直接执行情绪优化（零处可改）”分支。
+func testReviewerConfig(st *storepkg.Store) subagent.Config {
+	model := &scriptedChatModel{fn: func(msgs []agentcore.Message) agentcore.Message {
+		for _, m := range msgs {
+			if m.Role == agentcore.RoleTool {
+				return testTextMsg("done")
+			}
+		}
+		progress, _ := st.Progress.Load()
+		chapter := progress.PendingReviewChapter
+		content, _ := st.Drafts.LoadChapterText(chapter)
+		sum := sha256.Sum256([]byte(content))
+		return testToolCallMsg("finalize_reviewed_chapter", map[string]any{
+			"chapter":           chapter,
+			"source_digest":     "sha256:" + hex.EncodeToString(sum[:]),
+			"ai_patterns":       []string{},
+			"humanized_content": "",
+			"content":           content,
+		})
+	}}
+	return subagent.Config{
+		Name: "reviewer", Description: "test reviewer", Model: model, SystemPrompt: "test",
+		Tools: []agentcore.Tool{
+			tools.NewFinalizeReviewedChapterTool(st, tools.NewStyleStatsIndex(st)),
+		},
+		MaxTurns: 4, StopAfterTools: []string{"finalize_reviewed_chapter"},
+	}
 }
 
 // newTestEngine 组装带真实 store/observer 的引擎;返回引擎、事件采集与完成信号。
@@ -315,7 +368,7 @@ func TestEngine_ReviewPermitWritesExactlyOneNewChapter(t *testing.T) {
 		},
 		MaxTurns: 10, StopAfterTools: []string{"commit_chapter"},
 	}
-	e, _, done := newTestEngine(t, st, subagent.NewRunner(writer), nil)
+	e, _, done := newTestEngine(t, st, subagent.NewRunner(writer, testReviewerConfig(st)), nil)
 	if err := st.RunMeta.SetAdvanceMode(domain.ChapterAdvanceReview); err != nil {
 		t.Fatal(err)
 	}
@@ -334,9 +387,69 @@ func TestEngine_ReviewPermitWritesExactlyOneNewChapter(t *testing.T) {
 	if len(progress.CompletedChapters) != 1 || progress.CompletedChapters[0] != 1 {
 		t.Fatalf("一个许可必须恰好只稳定一个新章: %v", progress.CompletedChapters)
 	}
+	if progress.PendingReviewChapter != 0 {
+		t.Fatalf("许可章必须经过 Reviewer 后才能暂停: pending_review_chapter=%d", progress.PendingReviewChapter)
+	}
 	meta, _ := st.RunMeta.Load()
 	if meta.AdvancePermitChapter != 0 {
 		t.Fatalf("稳定提交后许可必须消费: %+v", meta)
+	}
+}
+
+func TestEngine_ReviewerPrecedesQueuedEditorDispatch(t *testing.T) {
+	st := storepkg.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("Reviewer 顺序试书", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.UpdatePhase(domain.PhaseWriting); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{
+		{Chapter: 1, Title: "一", CoreEvent: "a"},
+		{Chapter: 2, Title: "二", CoreEvent: "b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const chapter = "# 第一章\n\n本章正文。"
+	if err := st.Drafts.SaveFinalChapter(1, chapter); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.MarkChapterComplete(1, len([]rune(chapter)), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.RequireChapterReview(1); err != nil {
+		t.Fatal(err)
+	}
+	editor := subagent.Config{
+		Name: "editor", Description: "queued editor", SystemPrompt: "test", MaxTurns: 2,
+		Model: &scriptedChatModel{fn: func([]agentcore.Message) agentcore.Message {
+			return testTextMsg("editor done")
+		}},
+	}
+	e, events, done := newTestEngine(t, st, subagent.NewRunner(testReviewerConfig(st), editor), nil)
+	if err := st.RunMeta.SetAdvanceMode(domain.ChapterAdvanceReview); err != nil {
+		t.Fatal(err)
+	}
+	if !e.start(&flow.Instruction{Agent: "editor", Task: "用户已排队的 Editor 任务", Reason: "test"}) {
+		t.Fatal("engine start")
+	}
+	waitEngineDone(t, done)
+
+	var dispatched []string
+	for _, ev := range *events {
+		if ev.Category == "DISPATCH" && ev.FinishedAt.IsZero() {
+			dispatched = append(dispatched, strings.SplitN(ev.Summary, "（", 2)[0])
+		}
+	}
+	if len(dispatched) < 2 || dispatched[0] != "reviewer" || dispatched[1] != "editor" {
+		t.Fatalf("queued Editor must wait for Reviewer, dispatches=%v", dispatched)
+	}
+	p, _ := st.Progress.Load()
+	if p.PendingReviewChapter != 0 {
+		t.Fatalf("Reviewer quality gate not cleared: %+v", p)
 	}
 }
 
@@ -405,7 +518,7 @@ func TestEngine_WritesBookToCompletion(t *testing.T) {
 		MaxTurns:       10,
 		StopAfterTools: []string{"commit_chapter"},
 	}
-	e, events, done := newTestEngine(t, st, subagent.NewRunner(writer), nil)
+	e, events, done := newTestEngine(t, st, subagent.NewRunner(writer, testReviewerConfig(st)), nil)
 
 	if !e.start(nil) {
 		t.Fatal("engine start")
@@ -917,7 +1030,7 @@ func TestEngine_PauseWithEditorDispatchWaitsForRewriteQueue(t *testing.T) {
 		MaxTurns: 10, StopAfterTools: []string{"commit_chapter"},
 	}
 
-	e, _, done := newTestEngine(t, st, subagent.NewRunner(editor, writer), nil)
+	e, _, done := newTestEngine(t, st, subagent.NewRunner(editor, writer, testReviewerConfig(st)), nil)
 	// 模拟 Arbiter 返工裁定:hold + dispatch editor(引擎未运行 → 立即应用)。
 	e.applyControlOp(context.Background(), controlOp{
 		hold:     &arbiter.AdvanceHoldOp{After: domain.AdvanceHoldAfterRewritesDrained, Reason: "重写第1章语气,改完暂停验收"},
@@ -984,7 +1097,7 @@ func TestEngine_BoundaryHoldDoesNotDispatchAnotherWorker(t *testing.T) {
 		},
 		MaxTurns: 10, StopAfterTools: []string{"commit_chapter"},
 	}
-	e, _, done := newTestEngine(t, st, subagent.NewRunner(writer), nil)
+	e, _, done := newTestEngine(t, st, subagent.NewRunner(writer, testReviewerConfig(st)), nil)
 	if !e.start(nil) {
 		t.Fatal("engine start")
 	}
@@ -1025,10 +1138,7 @@ func TestEngine_ExitRaceRestoresPendingDispatch(t *testing.T) {
 	}
 
 	// worker 挂起直到 ctx 取消:制造"入队后引擎被 abort"的窗口。
-	blocked := &scriptedChatModel{fn: func([]agentcore.Message) agentcore.Message {
-		time.Sleep(50 * time.Millisecond)
-		return testTextMsg("...")
-	}}
+	blocked := &contextBlockingModel{started: make(chan struct{})}
 	writer := subagent.Config{Name: "writer", Description: "slow", Model: blocked, SystemPrompt: "t", MaxTurns: 100}
 	// 需要 outline 让 Route 派 writer
 	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "一", CoreEvent: "a"}, {Chapter: 2, Title: "二", CoreEvent: "b"}}); err != nil {
@@ -1038,6 +1148,11 @@ func TestEngine_ExitRaceRestoresPendingDispatch(t *testing.T) {
 
 	if !e.start(nil) {
 		t.Fatal("engine start")
+	}
+	select {
+	case <-blocked.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not start")
 	}
 	// worker 运行中:入队 pause+dispatch,随即 abort(动作永远等不到下个边界)。
 	e.enqueue(controlOp{

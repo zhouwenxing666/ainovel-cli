@@ -63,3 +63,30 @@ func TestExtractNovelNameFromPremise_Placeholder(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractSynopsisFromPremise(t *testing.T) {
+	cases := []struct {
+		name    string
+		premise string
+		want    string
+	}{
+		{
+			"正常段落",
+			"# 书名\n\n## 题材和基调\n玄幻\n\n## 作品简介\n这是一个关于勇气的故事。\n不剧透转折。\n\n## 核心冲突\n冲突",
+			"这是一个关于勇气的故事。\n不剧透转折。",
+		},
+		{"缺失段落", "# 书名\n\n## 题材和基调\n玄幻\n\n## 核心冲突\n冲突", ""},
+		{"段落到文末", "# 书名\n\n## 作品简介\n末段简介，后面没有别的标题。", "末段简介，后面没有别的标题。"},
+		{"空内容段落", "# 书名\n\n## 作品简介\n\n## 核心冲突\n冲突", ""},
+		{
+			"一级标题也结束段落",
+			"# 书名\n\n## 作品简介\n简介内容\n\n# 另一个标题",
+			"简介内容",
+		},
+	}
+	for _, c := range cases {
+		if got := ExtractSynopsisFromPremise(c.premise); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+}

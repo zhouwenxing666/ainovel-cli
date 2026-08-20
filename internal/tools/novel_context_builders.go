@@ -93,7 +93,7 @@ func mergeContextSection(result map[string]any, section map[string]any) {
 }
 
 // buildProgressStatus 在 Architect 不传 chapter 时返回进度摘要。
-// Writer/Editor 的章节路径不需要这些信息，避免干扰写作。
+// Writer/Reviewer/Editor 的章节路径不需要这些信息，避免干扰写作。
 func (t *ContextTool) buildProgressStatus(result map[string]any, warn func(string, error)) {
 	progress, err := t.store.Progress.Load()
 	if err != nil {
@@ -131,7 +131,7 @@ func (t *ContextTool) buildProgressStatus(result map[string]any, warn func(strin
 
 // buildUserRules 把合并后的 Bundle 注入 working_memory.user_rules（canonical 路径）。
 //
-// 单点注入：writer / editor / architect 任一路径调用 novel_context
+// 单点注入：writer / reviewer / editor / architect 任一路径调用 novel_context
 // 都能在 working_memory.user_rules 拿到一致的偏好。architect 路径原本没有 working_memory，
 // 由本函数按需新建（仅装 user_rules）；chapter > 0 路径下 working_memory 已存在，直接嵌入。
 //

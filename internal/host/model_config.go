@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,14 +22,19 @@ const (
 
 // ProviderSnapshot 是供 TUI 使用的脱敏 provider 配置。
 type ProviderSnapshot struct {
-	Name           string
-	Type           string
-	API            string
-	BaseURL        string
-	Models         []bootstrap.ModelConfig
-	HasAPIKey      bool
-	APIKeyHint     string
-	RequiresAPIKey bool
+	Name              string
+	Driver            string
+	Command           string
+	CodexHome         string
+	SingleCallTimeout string
+	WorkerTimeout     string
+	Type              string
+	API               string
+	BaseURL           string
+	Models            []bootstrap.ModelConfig
+	HasAPIKey         bool
+	APIKeyHint        string
+	RequiresAPIKey    bool
 }
 
 type ModelConfigurationSnapshot struct {
@@ -46,14 +52,19 @@ func (s ModelConfigurationSnapshot) ReferencesFor(provider, model string) []stri
 // ModelConfigurationDraft 是 /config 提交给 Host 的单个 provider 配置草稿。
 // 只描述该 provider 的定义（协议/凭证/模型库），不含“当前用哪个”——切换归 /model。
 type ModelConfigurationDraft struct {
-	Provider     string
-	Type         string
-	API          string
-	BaseURL      string
-	Models       []bootstrap.ModelConfig
-	Renames      []ModelRename
-	APIKeyAction APIKeyAction
-	APIKey       string
+	Provider          string
+	Driver            string
+	Command           string
+	CodexHome         string
+	SingleCallTimeout string
+	WorkerTimeout     string
+	Type              string
+	API               string
+	BaseURL           string
+	Models            []bootstrap.ModelConfig
+	Renames           []ModelRename
+	APIKeyAction      APIKeyAction
+	APIKey            string
 }
 
 // ModelRename 描述同一条模型配置的 ID 变化。它不是“删旧增新”的猜测，
@@ -94,7 +105,9 @@ func (h *Host) ModelConfiguration() ModelConfigurationSnapshot {
 	providers := make([]ProviderSnapshot, 0, len(h.cfg.Providers))
 	for name, pc := range h.cfg.Providers {
 		providers = append(providers, ProviderSnapshot{
-			Name: name, Type: pc.Type, API: pc.API, BaseURL: pc.BaseURL,
+			Name: name, Driver: pc.Driver, Command: pc.Command, CodexHome: pc.CodexHome,
+			SingleCallTimeout: pc.SingleCallTimeout, WorkerTimeout: pc.WorkerTimeout,
+			Type: pc.Type, API: pc.API, BaseURL: pc.BaseURL,
 			Models:    modelConfigurations(h.cfg, name, pc),
 			HasAPIKey: pc.APIKey != "", APIKeyHint: MaskAPIKey(pc.APIKey),
 			RequiresAPIKey: pc.RequiresAPIKey(name),
@@ -157,6 +170,11 @@ type preparedProviderDraft struct {
 // prepareProviderDraftLocked 将 TUI 草稿规范化并合入配置副本，保存和连接测试共用同一条校验链路。
 func (h *Host) prepareProviderDraftLocked(draft ModelConfigurationDraft) (preparedProviderDraft, error) {
 	draft.Provider = strings.TrimSpace(draft.Provider)
+	draft.Driver = strings.ToLower(strings.TrimSpace(draft.Driver))
+	draft.Command = strings.TrimSpace(draft.Command)
+	draft.CodexHome = strings.TrimSpace(draft.CodexHome)
+	draft.SingleCallTimeout = strings.TrimSpace(draft.SingleCallTimeout)
+	draft.WorkerTimeout = strings.TrimSpace(draft.WorkerTimeout)
 	draft.Type = strings.ToLower(strings.TrimSpace(draft.Type))
 	draft.API = strings.ToLower(strings.TrimSpace(draft.API))
 	draft.BaseURL = strings.TrimSpace(draft.BaseURL)
@@ -171,9 +189,20 @@ func (h *Host) prepareProviderDraftLocked(draft ModelConfigurationDraft) (prepar
 	candidate := bootstrap.CloneConfig(h.cfg)
 	pc := candidate.Providers[draft.Provider]
 	oldModels := modelConfigurations(candidate, draft.Provider, pc)
-	pc.Type = draft.Type
-	pc.API = draft.API
-	pc.BaseURL = draft.BaseURL
+	pc.Driver = draft.Driver
+	if pc.IsCodexCLI() {
+		pc.Command = draft.Command
+		pc.CodexHome = draft.CodexHome
+		pc.SingleCallTimeout = draft.SingleCallTimeout
+		pc.WorkerTimeout = draft.WorkerTimeout
+		pc.Type, pc.API, pc.APIKey, pc.BaseURL = "", "", "", ""
+		pc.Extra, pc.ExtraBody, pc.StreamIdleTimeout = nil, nil, ""
+	} else {
+		pc.Command, pc.CodexHome, pc.SingleCallTimeout, pc.WorkerTimeout = "", "", "", ""
+		pc.Type = draft.Type
+		pc.API = draft.API
+		pc.BaseURL = draft.BaseURL
+	}
 	configuredModels := make([]bootstrap.ModelConfig, 0, len(draft.Models))
 	seen := make(map[string]bool, len(draft.Models))
 	for _, model := range draft.Models {
@@ -192,12 +221,14 @@ func (h *Host) prepareProviderDraftLocked(draft ModelConfigurationDraft) (prepar
 	}
 	pc.Models = configuredModels
 
-	switch draft.APIKeyAction {
-	case "", APIKeyKeep:
+	switch {
+	case pc.IsCodexCLI():
+		// Codex reuses saved CLI auth and never accepts an API key here.
+	case draft.APIKeyAction == "" || draft.APIKeyAction == APIKeyKeep:
 		// 保留候选配置里的现有值；新增 provider 时自然为空。
-	case APIKeyReplace:
+	case draft.APIKeyAction == APIKeyReplace:
 		pc.APIKey = draft.APIKey
-	case APIKeyClear:
+	case draft.APIKeyAction == APIKeyClear:
 		pc.APIKey = ""
 	default:
 		return preparedProviderDraft{}, fmt.Errorf("未知 API Key 操作 %q", draft.APIKeyAction)
@@ -251,6 +282,9 @@ func (h *Host) ConfigureModels(draft ModelConfigurationDraft) error {
 
 	// 普通编辑不改变“当前用哪个”；显式重命名只迁移同一模型的引用身份。
 	if err := candidate.ValidateBase(); err != nil {
+		return err
+	}
+	if err := bootstrap.PreflightCodexProvider(context.Background(), draft.Provider, pc); err != nil {
 		return err
 	}
 	prepared, err := bootstrap.NewModelSet(candidate)
@@ -353,15 +387,40 @@ func renameModelReferences(cfg *bootstrap.Config, provider string, renames map[s
 }
 
 func (h *Host) saveModelConfigurationLocked(candidate bootstrap.Config, provider string, pc bootstrap.ProviderConfig, renamed bool) error {
+	globalPath := bootstrap.DefaultConfigPath()
+	if pc.IsCodexCLI() && !sameConfigPath(h.configPath, globalPath) {
+		// Persist the trusted process boundary globally first. The project layer
+		// receives only a process-free provider overlay.
+		if globalPath == "" {
+			return fmt.Errorf("无法定位全局配置文件，不能保存 Codex CLI process 配置")
+		}
+		if err := bootstrap.SaveProviderConfig(globalPath, provider, pc); err != nil {
+			return err
+		}
+		if !renamed {
+			safe := bootstrap.ProjectSafeConfig(bootstrap.Config{Providers: map[string]bootstrap.ProviderConfig{provider: pc}})
+			return bootstrap.SaveProviderConfig(h.configPath, provider, safe.Providers[provider])
+		}
+	}
 	if renamed {
 		// 引用与 provider 定义必须在同一次文件替换中落盘，否则进程重启可能只看到一半。
 		// /model 也使用 SaveConfig 写回有效配置；重命名沿用同一语义。
-		return bootstrap.SaveConfig(h.configPath, candidate)
+		return bootstrap.SaveEffectiveConfig(h.configPath, candidate)
 	}
 	return bootstrap.SaveProviderConfig(h.configPath, provider, pc)
 }
 
-// TestModelConnection 使用当前草稿构造一个真实模型客户端并发送最小请求。
+func sameConfigPath(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return false
+	}
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	return leftErr == nil && rightErr == nil && filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+}
+
+// TestModelConnection 使用当前草稿验证 provider。HTTP provider 会发送最小
+// 模型请求；Codex provider 只预检命令版本、登录与隔离能力，不消耗模型额度。
 // 它不保存配置、不切换运行时模型，也不在失败时降级到其他 Provider。
 func (h *Host) TestModelConnection(ctx context.Context, draft ModelConfigurationDraft, modelName string) error {
 	h.mu.Lock()
@@ -389,6 +448,9 @@ func (h *Host) TestModelConnection(ctx context.Context, draft ModelConfiguration
 	testConfig.Roles = nil
 	if err := testConfig.ValidateBase(); err != nil {
 		return err
+	}
+	if preparedDraft.provider.IsCodexCLI() {
+		return bootstrap.PreflightCodexProvider(ctx, preparedDraft.draft.Provider, preparedDraft.provider)
 	}
 	models, err := bootstrap.NewModelSet(testConfig)
 	if err != nil {

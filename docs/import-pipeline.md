@@ -495,6 +495,7 @@ BookSynthesis
 ```go
 type BookSynthesis struct {
 	Premise       string                 `json:"premise"`
+	Synopsis      string                 `json:"synopsis"` // 面向读者的无剧透作品简介
 	Characters    []domain.Character     `json:"characters"`
 	WorldRules    []domain.WorldRule     `json:"world_rules"`
 	Structure     []ImportedVolumeRange  `json:"structure"`
@@ -504,6 +505,8 @@ type BookSynthesis struct {
 	StatusReason  string                 `json:"status_reason"`
 }
 ```
+
+发布 Foundation 时，代码将 `Synopsis` 组装为 `premise.md` 中固定的 `## 作品简介` 段落，供 TXT/EPUB 导出复用；不依赖模型在自由格式 `Premise` 中恰好生成该标题。
 
 结构只返回范围，不重复输出所有章节：
 

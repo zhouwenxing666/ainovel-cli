@@ -52,6 +52,7 @@ func TestAssembleFoundationHappyClosed(t *testing.T) {
 	facts := factsN(3)
 	s := &BookSynthesis{
 		Premise:      "# 测试书\n\n前提",
+		Synopsis:     "甲直面困境并完成抉择。",
 		Characters:   []domain.Character{{Name: "甲"}},
 		PlanningTier: domain.PlanningTierShort,
 		StoryStatus:  storyClosed,
@@ -68,6 +69,9 @@ func TestAssembleFoundationHappyClosed(t *testing.T) {
 	if !f.Volumes[len(f.Volumes)-1].Final {
 		t.Fatal("closed 时末卷应 Final")
 	}
+	if got := domain.ExtractSynopsisFromPremise(f.Premise); got != s.Synopsis {
+		t.Fatalf("作品简介未写入 premise：got %q, want %q", got, s.Synopsis)
+	}
 }
 
 func TestAssembleFoundationTitleMismatch(t *testing.T) {
@@ -75,7 +79,7 @@ func TestAssembleFoundationTitleMismatch(t *testing.T) {
 	facts[1].Title = "" // 破坏标题一致性会在 FlattenOutline 校验失败？标题空但结构取自 facts，故一致。
 	// 用结构覆盖不到的章制造真实不一致：章数不符。
 	s := &BookSynthesis{
-		Premise: "# 书", Characters: []domain.Character{{Name: "甲"}},
+		Premise: "# 书", Synopsis: "简介", Characters: []domain.Character{{Name: "甲"}},
 		PlanningTier: domain.PlanningTierShort, StoryStatus: storyOpen,
 		Compass:   domain.StoryCompass{EndingDirection: "x"},
 		Structure: []ImportedVolumeRange{{Arcs: []ImportedArcRange{{StartChapter: 1, EndChapter: 1}}}},
@@ -91,6 +95,34 @@ func TestEnsurePremiseTitle(t *testing.T) {
 	}
 	if got := ensurePremiseTitle("# 已有书名\n正文", "x.txt"); got != "# 已有书名\n正文" {
 		t.Fatal("已有标题不应改写")
+	}
+}
+
+func TestEnsurePremiseSynopsisReplacesExistingSection(t *testing.T) {
+	premise := "# 测试书\n\n## 核心冲突\n冲突\n\n### 作品简介\n旧简介\n\n## 角色\n甲"
+	got := ensurePremiseSynopsis(premise, "新简介")
+	if synopsis := domain.ExtractSynopsisFromPremise(got); synopsis != "新简介" {
+		t.Fatalf("作品简介 = %q, want %q\n%s", synopsis, "新简介", got)
+	}
+	if strings.Count(got, "作品简介") != 1 || !strings.Contains(got, "## 作品简介\n新简介") {
+		t.Fatalf("同名段落应被规范化且只保留一个：\n%s", got)
+	}
+	if !strings.Contains(got, "## 角色\n甲") {
+		t.Fatalf("后续段落不应丢失：\n%s", got)
+	}
+}
+
+func TestValidateSynthesisRejectsEmptySynopsis(t *testing.T) {
+	s := &BookSynthesis{
+		Premise:      "# 测试书\n\n前提",
+		Characters:   []domain.Character{{Name: "甲"}},
+		PlanningTier: domain.PlanningTierShort,
+		StoryStatus:  storyOpen,
+		Compass:      domain.StoryCompass{EndingDirection: "收束"},
+		Structure:    []ImportedVolumeRange{{Arcs: []ImportedArcRange{{StartChapter: 1, EndChapter: 1}}}},
+	}
+	if err := validateSynthesis(s, 1); err == nil || !strings.Contains(err.Error(), "synopsis") {
+		t.Fatalf("空 synopsis 应被拒绝，得：%v", err)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/voocel/agentcore"
 	"github.com/voocel/agentcore/schema"
@@ -30,6 +31,13 @@ const decideMaxTokens = 8192
 
 // decide 将场景契约与业务校验交给统一结构化执行器。除模型调用外无 IO。
 func decide[T any](ctx context.Context, model agentcore.ChatModel, contract llmcontract.Contract, systemPrompt, payload string, validate func(*T) error) (T, error) {
+	if provider, ok := model.(interface{ OverallTimeout() time.Duration }); ok {
+		if timeout := provider.OverallTimeout(); timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+	}
 	out, err := llmcontract.Execute(ctx, model, llmcontract.Request[T]{
 		Contract:     contract,
 		SystemPrompt: systemPrompt,
@@ -64,7 +72,7 @@ type DispatchOp struct {
 
 // workerNames 是合法派单目标(与 agents.BuildWorkers 注册的一致)。有序切片:
 // 同时充当 schema enum(顺序确定保 fingerprint 稳定)与校验白名单。
-var workerNames = []string{"architect_long", "architect_short", "writer", "editor"}
+var workerNames = []string{"architect_long", "architect_short", "writer", "reviewer", "editor"}
 
 func (d *DispatchOp) validate() error {
 	if d == nil {

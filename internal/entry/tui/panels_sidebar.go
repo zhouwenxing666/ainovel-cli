@@ -303,7 +303,7 @@ func renderUsageSidebar(snap host.UISnapshot, width int) string {
 	var b strings.Builder
 	b.WriteString(renderField("输入", formatTokensCompact(snap.TotalInputTokens)))
 	b.WriteString(renderField("输出", formatTokensCompact(snap.TotalOutputTokens)))
-	if cost := formatCostUSD(snap.TotalCostUSD); cost != "" {
+	if cost := formatUsageCost(snap.TotalCostUSD, snap.CostUnavailable); cost != "" {
 		b.WriteString(renderField("费用", cost))
 	}
 	if saved := formatCostUSD(snap.TotalSavedUSD); saved != "" {
@@ -311,7 +311,11 @@ func renderUsageSidebar(snap host.UISnapshot, width int) string {
 	}
 	if snap.BudgetLimitUSD > 0 {
 		pct := snap.TotalCostUSD / snap.BudgetLimitUSD * 100
-		b.WriteString(renderField("预算", fmt.Sprintf("$%.2f/$%.2f (%.0f%%)", snap.TotalCostUSD, snap.BudgetLimitUSD, pct)))
+		budget := fmt.Sprintf("$%.2f/$%.2f (%.0f%%)", snap.TotalCostUSD, snap.BudgetLimitUSD, pct)
+		if snap.CostUnavailable {
+			budget += " · 仅 API"
+		}
+		b.WriteString(renderField("预算", budget))
 	}
 
 	agentStats := usageStatsByCost(snap.CachePerAgent)
@@ -320,7 +324,7 @@ func renderUsageSidebar(snap host.UISnapshot, width int) string {
 		limit := min(len(agentStats), 4)
 		for i := 0; i < limit; i++ {
 			a := agentStats[i]
-			b.WriteString(renderUsageLine(agentDisplayName(a.Role), eventAgentColor(a.Role), a.Input, a.Output, a.Cost, width))
+			b.WriteString(renderUsageLine(agentDisplayName(a.Role), eventAgentColor(a.Role), a.Input, a.Output, a.Cost, a.CostUnavailable, width))
 			b.WriteString("\n")
 		}
 	}
@@ -330,7 +334,7 @@ func renderUsageSidebar(snap host.UISnapshot, width int) string {
 		limit := min(len(modelStats), 4)
 		for i := 0; i < limit; i++ {
 			a := modelStats[i]
-			b.WriteString(renderUsageLine(modelDisplayName(a.Model), bodyTextColor, a.Input, a.Output, a.Cost, width))
+			b.WriteString(renderUsageLine(modelDisplayName(a.Model), bodyTextColor, a.Input, a.Output, a.Cost, a.CostUnavailable, width))
 			b.WriteString("\n")
 		}
 	}
@@ -354,7 +358,7 @@ func renderUsageGroupHeader(label string, width int) string {
 	return lipgloss.NewStyle().Foreground(colorMuted).Render(label+" ") + line + "\n"
 }
 
-func renderUsageLine(name string, color lipgloss.TerminalColor, input, output int, cost float64, width int) string {
+func renderUsageLine(name string, color lipgloss.TerminalColor, input, output int, cost float64, costUnavailable bool, width int) string {
 	nameW := 11
 	if width < 24 {
 		nameW = 8
@@ -363,12 +367,24 @@ func renderUsageLine(name string, color lipgloss.TerminalColor, input, output in
 		Render(truncate(name, nameW))
 	tokens := formatTokensCompact(input + output)
 	right := tokens
-	if costStr := formatCostUSD(cost); costStr != "" {
+	if costStr := formatUsageCost(cost, costUnavailable); costStr != "" {
 		right += " · " + costStr
 	}
 	// 名称恰好占满固定列宽时，padding 不会留下尾随空格；显式分隔，避免
 	// "gpt-5.6-sol5.3k" 这类模型名与用量粘连。
 	return fitInlineLine(nameCell+" "+lipgloss.NewStyle().Foreground(colorDim).Render(right), width)
+}
+
+func formatUsageCost(cost float64, unavailable bool) string {
+	priced := formatCostUSD(cost)
+	switch {
+	case unavailable && priced != "":
+		return priced + " + N/A"
+	case unavailable:
+		return "N/A"
+	default:
+		return priced
+	}
 }
 
 func modelDisplayName(model string) string {
@@ -669,10 +685,12 @@ func agentOrder(name string) int {
 	switch {
 	case strings.HasPrefix(name, "architect"):
 		return 0
-	case name == "editor":
+	case name == "reviewer":
 		return 2
-	case name == "writer":
+	case name == "editor":
 		return 3
+	case name == "writer":
+		return 4
 	default:
 		return 9
 	}

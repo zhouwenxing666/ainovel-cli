@@ -112,6 +112,7 @@ var synthesisContract = llmcontract.Contract{
 	Description: "综合全书事实并给出连续完整的卷弧范围",
 	Schema: schema.Object(
 		schema.Property("premise", schema.String("故事前提的 Markdown 描述")).Required(),
+		schema.Property("synopsis", schema.String("面向读者的 100-200 字作品简介；概括核心冲突与看点，不剧透关键转折")).Required(),
 		schema.Property("characters", schema.Array("主要人物", schema.Object(
 			schema.Property("name", schema.String("人物名")).Required(),
 			schema.Property("aliases", stringList("别名与称号")).Required(),

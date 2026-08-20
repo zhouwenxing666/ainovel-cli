@@ -70,6 +70,9 @@ func TestPremiseStructure(t *testing.T) {
 
 ## 中段转折
 转折
+
+## 作品简介
+简介
 `
 
 	structure := premiseStructure(premise, domain.PlanningTierMid)
@@ -112,6 +115,9 @@ func TestPremiseStructureShortAcceptsLegacyHeadingAlias(t *testing.T) {
 
 ## 本作为什么适合短篇/单卷收束
 核心矛盾和人物弧线都能在单次任务中完成。
+
+## 作品简介
+简介
 `
 
 	structure := premiseStructure(premise, domain.PlanningTierShort)

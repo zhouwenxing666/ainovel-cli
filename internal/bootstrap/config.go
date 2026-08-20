@@ -18,6 +18,13 @@ import (
 // DefaultContextWindow 模型未在 registry 登记时的兜底窗口大小。
 const DefaultContextWindow = 200000
 
+const (
+	// DefaultCodexModel 是 Local Codex 首次配置及缺省迁移使用的产品默认模型。
+	DefaultCodexModel = "gpt-5.6-sol"
+	// DefaultCodexReasoningEffort 是 Local Codex 未显式配置推理强度时的产品默认值。
+	DefaultCodexReasoningEffort = "xhigh"
+)
+
 // CompactRatio 触发上下文压缩的相对阈值：tokens >= window * CompactRatio 时压缩。
 // 0.85 是经验值，给"下一轮 prompt + 大工具结果"留 15% 头部空间，同时让大窗口
 // 模型也能在 85% 主动压缩，避免在 1M 名义窗口下吃满才压（注意力衰退区）。
@@ -49,11 +56,24 @@ func CompactReserveTokens(window int) int {
 
 // ProviderConfig 定义单个 LLM 提供商的凭证。
 type ProviderConfig struct {
-	Type    string        `json:"type,omitempty"`     // API 协议类型（openai/anthropic/gemini），自定义代理时指定
-	API     string        `json:"api,omitempty"`      // OpenAI 协议 endpoint：chat（默认）/ responses
-	APIKey  string        `json:"api_key,omitempty"`  // API Key
-	BaseURL string        `json:"base_url,omitempty"` // API Base URL
-	Models  []ModelConfig `json:"models,omitempty"`   // 可选模型列表，供 TUI 切换时展示
+	// Driver 选择 provider 的传输后端。留空表示现有 HTTP provider；codex_cli
+	// 表示复用本机 Codex CLI 的登录态，不读取 api_key。
+	Driver string `json:"driver,omitempty"`
+	// Command 是 codex_cli 的可执行文件路径或命令名。它只允许来自全局配置；
+	// 项目级配置不能覆盖进程启动边界。
+	Command string `json:"command,omitempty"`
+	// CodexHome 可选地指定只用于读取 Codex 登录态的目录；不会把 ainovel 的
+	// 临时 MCP 或运行配置写回该目录。
+	CodexHome string `json:"codex_home,omitempty"`
+	// SingleCallTimeout 和 WorkerTimeout 分别约束 Arbiter/辅助单次调用与完整
+	// Worker 任务。均为 Go duration；留空分别默认 3m 与 30m。
+	SingleCallTimeout string        `json:"single_call_timeout,omitempty"`
+	WorkerTimeout     string        `json:"worker_timeout,omitempty"`
+	Type              string        `json:"type,omitempty"`     // API 协议类型（openai/anthropic/gemini），自定义代理时指定
+	API               string        `json:"api,omitempty"`      // OpenAI 协议 endpoint：chat（默认）/ responses
+	APIKey            string        `json:"api_key,omitempty"`  // API Key
+	BaseURL           string        `json:"base_url,omitempty"` // API Base URL
+	Models            []ModelConfig `json:"models,omitempty"`   // 可选模型列表，供 TUI 切换时展示
 	// ExtraBody 透传给该 provider 每次请求的额外参数（如 temperature/top_p/min_p/
 	// presence_penalty，或厂商特有键如 nvidia 开 think 的 chat_template_kwargs）。
 	// OpenAI 兼容端逐字并入请求体（即 extra_body 约定）；值由用户自负其责。
@@ -126,6 +146,11 @@ func (c Config) ModelJSONSchema(provider, model string) *bool {
 // 触发误杀；5 分钟覆盖绝大多数实测案例（参见 tasks/todo.md plan→draft 思考时长统计）。
 const defaultStreamIdleTimeout = 5 * time.Minute
 
+const (
+	defaultCodexSingleCallTimeout = 3 * time.Minute
+	defaultCodexWorkerTimeout     = 30 * time.Minute
+)
+
 // StreamIdleTimeoutValue 解析该 provider 的流式空闲超时；留空回落默认值。
 func (pc ProviderConfig) StreamIdleTimeoutValue() (time.Duration, error) {
 	s := strings.TrimSpace(pc.StreamIdleTimeout)
@@ -142,12 +167,43 @@ func (pc ProviderConfig) StreamIdleTimeoutValue() (time.Duration, error) {
 	return d, nil
 }
 
+// IsCodexCLI 报告该 provider 是否由本机 Codex CLI 驱动。
+func (pc ProviderConfig) IsCodexCLI() bool { return pc.Driver == "codex_cli" }
+
+// SingleCallTimeoutValue 返回 Codex 单次结构化调用的超时。
+func (pc ProviderConfig) SingleCallTimeoutValue() (time.Duration, error) {
+	return parsePositiveDuration(pc.SingleCallTimeout, defaultCodexSingleCallTimeout)
+}
+
+// WorkerTimeoutValue 返回 Codex Worker 完整任务的超时。
+func (pc ProviderConfig) WorkerTimeoutValue() (time.Duration, error) {
+	return parsePositiveDuration(pc.WorkerTimeout, defaultCodexWorkerTimeout)
+}
+
+func parsePositiveDuration(raw string, fallback time.Duration) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q (use Go duration like \"45s\" / \"30m\")", raw)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("must be positive, got %q", raw)
+	}
+	return d, nil
+}
+
 // RequiresAPIKey 返回该 provider 是否必须显式配置 api_key。
 // 约定：
 // 1. ollama / bedrock 允许无 key；
 // 2. 显式指定 Type 的配置视为自定义代理，允许无 key；
 // 3. 其他 provider 默认要求 key，保持对官方托管接口的保守校验。
 func (pc ProviderConfig) RequiresAPIKey(name string) bool {
+	if pc.Driver == "codex_cli" {
+		return false
+	}
 	switch name {
 	case "ollama", "bedrock":
 		return false
@@ -181,15 +237,18 @@ type RoleConfig struct {
 	// ReasoningEffort 该角色的推理强度（off/low/medium/high/xhigh/max），空=继承顶层默认。
 	// 由 agents.ParseThinkingLevel 校验后应用，越级值视为空。
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Timeout 可按角色覆盖 provider 的 single_call_timeout / worker_timeout。
+	Timeout string `json:"timeout,omitempty"`
 }
 
-// knownRoles 支持的可配置角色名。Arbiter 当前不开放角色级配置，
-// 统一使用顶层默认模型（host.arbiterModel 用 models.Default）。
+// knownRoles 支持的可配置角色名。
 // import_* 是导入语义函数的模型档位旋钮（docs/import-pipeline.md §13.1）：
 // 未配置时落 architect，配置后可把机械性更强的函数指到更便宜档位。
 var knownRoles = map[string]bool{
+	"arbiter":           true,
 	"architect":         true,
 	"writer":            true,
+	"reviewer":          true,
 	"editor":            true,
 	"import_segment":    true,
 	"import_analyze":    true,
@@ -226,6 +285,16 @@ type Config struct {
 
 	// Notify 无人值守告警配置；缺省启用（system 通道兜底）。
 	Notify NotifyConfig `json:"notify,omitzero"`
+}
+
+// NewDefaultCodexConfig 构造首次向导可直接保存的 Local Codex 配置。
+func NewDefaultCodexConfig(providerName string, provider ProviderConfig) Config {
+	cfg := Config{
+		Provider:  providerName,
+		Providers: map[string]ProviderConfig{providerName: provider},
+	}
+	cfg.FillDefaults()
+	return cfg
 }
 
 // BudgetConfig 是用户对单本书钱包的政策声明。越线停机等同于用户在那一刻
@@ -302,11 +371,19 @@ func (c *Config) ValidateBase() error {
 		if err := validateConfigText(fmt.Sprintf("role %q model", role), rc.Model); err != nil {
 			return err
 		}
+		if err := validateConfigText(fmt.Sprintf("role %q timeout", role), rc.Timeout); err != nil {
+			return err
+		}
 		if !knownRoles[role] {
-			return fmt.Errorf("unknown role %q in roles config (valid: architect/writer/editor/import_segment/import_analyze/import_synthesize): %w", role, errs.ErrConfig)
+			return fmt.Errorf("unknown role %q in roles config (valid: arbiter/architect/writer/reviewer/editor/import_segment/import_analyze/import_synthesize): %w", role, errs.ErrConfig)
 		}
 		if rc.Provider == "" || rc.Model == "" {
 			return fmt.Errorf("role %q must have both provider and model: %w", role, errs.ErrConfig)
+		}
+		if rc.Timeout != "" {
+			if _, err := parsePositiveDuration(rc.Timeout, 0); err != nil {
+				return fmt.Errorf("role %q timeout: %w: %w", role, err, errs.ErrConfig)
+			}
 		}
 		if err := c.validateModelRef(
 			fmt.Sprintf("role %q", role),
@@ -356,10 +433,43 @@ func validateProviderConfigText(name string, pc ProviderConfig) error {
 		label string
 		value string
 	}{
+		{label: fmt.Sprintf("provider %q driver", name), value: pc.Driver},
+		{label: fmt.Sprintf("provider %q command", name), value: pc.Command},
+		{label: fmt.Sprintf("provider %q codex_home", name), value: pc.CodexHome},
+		{label: fmt.Sprintf("provider %q single_call_timeout", name), value: pc.SingleCallTimeout},
+		{label: fmt.Sprintf("provider %q worker_timeout", name), value: pc.WorkerTimeout},
 		{label: fmt.Sprintf("provider %q type", name), value: pc.Type},
 		{label: fmt.Sprintf("provider %q api", name), value: pc.API},
 		{label: fmt.Sprintf("provider %q api_key", name), value: pc.APIKey},
 		{label: fmt.Sprintf("provider %q base_url", name), value: pc.BaseURL},
+	}
+	switch pc.Driver {
+	case "", "codex_cli":
+	default:
+		return fmt.Errorf("provider %q driver must be codex_cli or empty: %w", name, errs.ErrConfig)
+	}
+	if pc.Driver == "codex_cli" && strings.TrimSpace(pc.Command) == "" {
+		return fmt.Errorf("provider %q command is required for codex_cli: %w", name, errs.ErrConfig)
+	}
+	if pc.IsCodexCLI() {
+		command := strings.TrimSpace(pc.Command)
+		if strings.ContainsAny(command, `/\`) && !filepath.IsAbs(command) {
+			return fmt.Errorf("provider %q codex_cli command must be a bare command name or absolute path: %w", name, errs.ErrConfig)
+		}
+		if home := strings.TrimSpace(pc.CodexHome); home != "" && !filepath.IsAbs(home) {
+			return fmt.Errorf("provider %q codex_home must be an absolute path: %w", name, errs.ErrConfig)
+		}
+		if pc.Type != "" || pc.API != "" || pc.APIKey != "" || pc.BaseURL != "" || len(pc.Extra) > 0 || len(pc.ExtraBody) > 0 || pc.StreamIdleTimeout != "" {
+			return fmt.Errorf("provider %q codex_cli cannot use HTTP fields (type/api/api_key/base_url/extra/extra_body/stream_idle_timeout): %w", name, errs.ErrConfig)
+		}
+		if _, err := pc.SingleCallTimeoutValue(); err != nil {
+			return fmt.Errorf("provider %q single_call_timeout: %w: %w", name, err, errs.ErrConfig)
+		}
+		if _, err := pc.WorkerTimeoutValue(); err != nil {
+			return fmt.Errorf("provider %q worker_timeout: %w: %w", name, err, errs.ErrConfig)
+		}
+	} else if pc.Command != "" || pc.CodexHome != "" || pc.SingleCallTimeout != "" || pc.WorkerTimeout != "" {
+		return fmt.Errorf("provider %q process fields require driver codex_cli: %w", name, errs.ErrConfig)
 	}
 	for _, field := range fields {
 		if err := validateConfigText(field.label, field.value); err != nil {
@@ -388,8 +498,10 @@ func validateProviderConfigText(name string, pc ProviderConfig) error {
 	default:
 		return fmt.Errorf("provider %q api must be chat or responses: %w", name, errs.ErrConfig)
 	}
-	if _, err := pc.StreamIdleTimeoutValue(); err != nil {
-		return fmt.Errorf("provider %q stream_idle_timeout: %w: %w", name, err, errs.ErrConfig)
+	if !pc.IsCodexCLI() {
+		if _, err := pc.StreamIdleTimeoutValue(); err != nil {
+			return fmt.Errorf("provider %q stream_idle_timeout: %w: %w", name, err, errs.ErrConfig)
+		}
 	}
 	return nil
 }
@@ -425,6 +537,32 @@ func (c *Config) FillDefaults() {
 	}
 	if c.Budget.Enabled() && c.Budget.WarnRatio == 0 {
 		c.Budget.WarnRatio = 0.8
+	}
+	c.fillCodexDefaults()
+}
+
+func (c *Config) fillCodexDefaults() {
+	for name, provider := range c.Providers {
+		if !provider.IsCodexCLI() {
+			continue
+		}
+		selected := name == c.Provider
+		if selected {
+			if strings.TrimSpace(c.ModelName) == "" {
+				c.ModelName = DefaultCodexModel
+			}
+			if strings.TrimSpace(c.ReasoningEffort) == "" {
+				c.ReasoningEffort = DefaultCodexReasoningEffort
+			}
+		}
+		if len(provider.Models) == 0 {
+			model := DefaultCodexModel
+			if selected && strings.TrimSpace(c.ModelName) != "" {
+				model = c.ModelName
+			}
+			provider.Models = []ModelConfig{{Name: model}}
+			c.Providers[name] = provider
+		}
 	}
 }
 

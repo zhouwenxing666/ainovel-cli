@@ -29,14 +29,14 @@ Host(保留包名;内部新增 EngineLoop,不做纯机械改名)
   ├─ 明确语义场景 → 调 Arbiter 函数
   └─ 事件投影 / 预算 / 停靠点 / 通知(现职responsibility保留)
   ↓
-Workers(architect / writer / editor,内部自主,checkpoint-delta 守卫保留)
+Workers(architect / writer / reviewer / editor,内部自主,checkpoint-delta 守卫保留)
   ↓
 Tools → Store(唯一事实源)
 ```
 
 职责:**Route 管一切可查表的下一步;Arbiter 管边界清晰的语义判断;Worker 管开放式创作;Engine 执行决定、不参与文学判断;Observer/Diag 只观察。**
 
-一句话概括终态:**一个串行确定性 Engine、三个自主 Worker、少数几个按需 Arbiter 函数、一个文件系统事实层。**
+一句话概括终态:**一个串行确定性 Engine、四个自主 Worker、少数几个按需 Arbiter 函数、一个文件系统事实层。**
 
 ### 两平面对称(拟写入 architecture.md 作为新铁律)
 

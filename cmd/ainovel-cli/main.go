@@ -9,6 +9,7 @@ import (
 
 	"github.com/voocel/ainovel-cli/assets"
 	"github.com/voocel/ainovel-cli/internal/bootstrap"
+	"github.com/voocel/ainovel-cli/internal/codexcli"
 	"github.com/voocel/ainovel-cli/internal/entry/headless"
 	"github.com/voocel/ainovel-cli/internal/entry/tui"
 	"github.com/voocel/ainovel-cli/internal/eval"
@@ -26,6 +27,11 @@ var (
 var headlessMode bool
 
 func main() {
+	// Hidden, capability-scoped stdio proxy used only by a parent ainovel
+	// process. It must bypass setup/config/TUI and keep stdout MCP-only.
+	if len(os.Args) > 1 && os.Args[1] == "__codex-mcp" {
+		os.Exit(runCodexMCPProxy(os.Args[2:]))
+	}
 	// 子命令在常规 flag 解析之前拦截：eval 是离线评测 harness，参数体系独立。
 	if len(os.Args) > 1 && os.Args[1] == "eval" {
 		os.Exit(eval.Command(os.Args[2:]))
@@ -69,6 +75,40 @@ func main() {
 	}
 
 	runWithConfig(cfg, opts, args)
+}
+
+func runCodexMCPProxy(args []string) int {
+	var socket, token string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--socket":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "__codex-mcp: --socket requires a value")
+				return 2
+			}
+			socket = args[i+1]
+			i++
+		case "--token":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "__codex-mcp: --token requires a value")
+				return 2
+			}
+			token = args[i+1]
+			i++
+		default:
+			fmt.Fprintf(os.Stderr, "__codex-mcp: unknown argument %q\n", args[i])
+			return 2
+		}
+	}
+	if socket == "" || token == "" {
+		fmt.Fprintln(os.Stderr, "__codex-mcp: --socket and --token are required")
+		return 2
+	}
+	if err := codexcli.RunMCPProxy(context.Background(), socket, token, os.Stdin, os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "__codex-mcp: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // die 统一处理致命错误退出：打印到 stderr、落盘到 ~/.ainovel/last-error.log，

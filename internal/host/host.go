@@ -91,6 +91,9 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 	if err := cfg.ValidateBase(); err != nil {
 		return nil, err
 	}
+	if err := bootstrap.PreflightCodexProviders(context.Background(), cfg); err != nil {
+		return nil, err
+	}
 
 	bookLease, err := acquireBookLease(cfg.OutputDir)
 	if err != nil {
@@ -232,12 +235,13 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 				Summary: fmt.Sprintf("StopGuard: %s 未完成必要产物就试图结束，已拦截催促（连续第 %d 次）", agent, n), Level: "info"})
 		}
 	}
-	// Engine:确定性执行引擎(docs/engine-rfc.md)。arbiter 用 Default 模型(过渡限制,
-	// 见 engine-arbiter.md §4.2)。
+	// Engine:确定性执行引擎(docs/engine-rfc.md)。Arbiter 可独立配置角色模型，
+	// 未配置时由 ModelSet.ForRole 按契约回落顶层默认。
+	arbiterRoleModel := models.DynamicRoleWithFailover("arbiter", logArbiterFailover)
 	h.engine = &engine{
 		store:           store,
 		workers:         workers,
-		arbiterModel:    newUsageTrackedModel(models.Default, "arbiter", usage.Record),
+		arbiterModel:    newUsageTrackedModel(arbiterRoleModel, "arbiter", usage.Record),
 		failurePrompt:   bundle.Prompts.ArbiterFailure,
 		planStartPrompt: bundle.Prompts.ArbiterPlanStart,
 		style:           cfg.Style,
@@ -694,7 +698,16 @@ func newInterventionFailureEvent(err error) Event {
 
 // arbiterModel 返回带用量追踪的裁定模型(token/成本进预算与 usage 系统)。
 func (h *Host) arbiterModel() agentcore.ChatModel {
-	return newUsageTrackedModel(h.models.Default, "arbiter", h.usage.Record)
+	return newUsageTrackedModel(h.models.DynamicRoleWithFailover("arbiter", logArbiterFailover), "arbiter", h.usage.Record)
+}
+
+func logArbiterFailover(event bootstrap.FailoverEvent) {
+	slog.Warn("Arbiter provider fallback",
+		"module", "arbiter", "role", event.Role, "reason", event.Reason,
+		"from", event.FromProvider+"/"+event.FromModel,
+		"to", event.ToProvider+"/"+event.ToModel,
+		"err", event.Err,
+	)
 }
 
 // Continue 停机后用户在输入框输入时调用:干预裁定 + 确保引擎重新运行。
@@ -1076,6 +1089,7 @@ func (h *Host) Snapshot() UISnapshot {
 			Cost:            a.Cost,
 			Saved:           a.Saved,
 			CacheCapable:    a.CacheCapable,
+			CostUnavailable: a.CostUnavailable,
 			RecentCacheRead: a.RecentCacheRead,
 			RecentInput:     a.RecentInput,
 			RecentSamples:   a.RecentSamples,
@@ -1085,14 +1099,15 @@ func (h *Host) Snapshot() UISnapshot {
 	modelStats := make([]AgentCacheStat, 0, len(perModel))
 	for _, a := range perModel {
 		modelStats = append(modelStats, AgentCacheStat{
-			Model:        a.Model,
-			Input:        a.Input,
-			Output:       a.Output,
-			CacheRead:    a.CacheRead,
-			CacheWrite:   a.CacheWrite,
-			Cost:         a.Cost,
-			Saved:        a.Saved,
-			CacheCapable: a.CacheCapable,
+			Model:           a.Model,
+			Input:           a.Input,
+			Output:          a.Output,
+			CacheRead:       a.CacheRead,
+			CacheWrite:      a.CacheWrite,
+			Cost:            a.Cost,
+			Saved:           a.Saved,
+			CacheCapable:    a.CacheCapable,
+			CostUnavailable: a.CostUnavailable,
 		})
 	}
 
@@ -1109,6 +1124,7 @@ func (h *Host) Snapshot() UISnapshot {
 		TotalCacheReadTokens:   cacheRead,
 		TotalCacheWriteTokens:  cacheWrite,
 		TotalCostUSD:           cost,
+		CostUnavailable:        h.usage.CostUnavailable(),
 		TotalSavedUSD:          saved,
 		BudgetLimitUSD:         h.budget.Limit(),
 		OverallCacheCapable:    overallCapable,
@@ -1132,6 +1148,7 @@ func (h *Host) Snapshot() UISnapshot {
 		snap.TotalWordCount = progress.TotalWordCount
 		snap.InProgressChapter = progress.InProgressChapter
 		snap.PendingRewrites = progress.PendingRewrites
+		snap.PendingReviewChapter = progress.PendingReviewChapter
 		snap.RewriteReason = progress.RewriteReason
 		snap.Layered = progress.Layered
 		if progress.CurrentVolume > 0 {
@@ -1309,6 +1326,13 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 	if provider == "" || model == "" {
 		return fmt.Errorf("provider and model are required")
 	}
+	providerConfig, ok := h.cfg.Providers[provider]
+	if !ok {
+		return fmt.Errorf("provider %q is not configured", provider)
+	}
+	if err := bootstrap.PreflightCodexProvider(context.Background(), provider, providerConfig); err != nil {
+		return err
+	}
 	if err := h.models.Swap(role, provider, model); err != nil {
 		return err
 	}
@@ -1326,7 +1350,7 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 	}
 	// 换模型不改动已存的推理强度意图：只在下发时按新模型能力钳制。
 	if h.configPath != "" {
-		if err := bootstrap.SaveConfig(h.configPath, h.cfg); err != nil {
+		if err := bootstrap.SaveEffectiveConfig(h.configPath, h.cfg); err != nil {
 			slog.Warn("保存配置失败", "module", "host", "err", err)
 		}
 	}
@@ -1339,7 +1363,7 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 	window, source := h.cfg.ResolveContextWindow(provider, model)
 	bootstrap.LogContextWindowChoice(logRole, model, window, source)
 
-	// 无常驻上下文需要联动:writer/architect/editor 的 ContextManager 走
+	// 无常驻上下文需要联动:writer/architect/reviewer/editor 的 ContextManager 走
 	// ContextManagerFactory,下次 spawn 自动按新模型窗口重建。
 
 	h.emitEvent(Event{
@@ -1353,7 +1377,7 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 
 // concreteThinkingRoles 是可应用推理强度的具体角色（与 agents.ApplyThinking 路由一致）。
 // 调 default 时按各角色 ResolveReasoningEffort 逐个重新应用。
-var concreteThinkingRoles = []string{"architect", "writer", "editor"}
+var concreteThinkingRoles = []string{"arbiter", "architect", "writer", "reviewer", "editor"}
 
 // CurrentThinking 返回某角色当前生效的推理强度原始串（供 /model 面板同步当前值）。
 func (h *Host) CurrentThinking(role string) string {
@@ -1404,19 +1428,29 @@ func (h *Host) SetRoleThinking(role, level string) error {
 		return err
 	}
 	role = strings.ToLower(strings.TrimSpace(role))
+	candidate := bootstrap.CloneConfig(h.cfg)
 	// 存储保留原始意图：直接持久化用户选定的强度，钳制只在下发(applyThinkingLocked)时按模型能力发生。
 	if role == "" || role == "default" {
-		h.cfg.ReasoningEffort = string(parsed)
+		candidate.ReasoningEffort = string(parsed)
 	} else {
-		if h.cfg.Roles == nil {
-			h.cfg.Roles = make(map[string]bootstrap.RoleConfig)
+		if candidate.Roles == nil {
+			candidate.Roles = make(map[string]bootstrap.RoleConfig)
 		}
-		rc := h.cfg.Roles[role]
+		rc := candidate.Roles[role]
+		if rc.Provider == "" || rc.Model == "" {
+			rc.Provider, rc.Model, _ = h.models.CurrentSelection(role)
+		}
 		rc.ReasoningEffort = string(parsed)
-		h.cfg.Roles[role] = rc
+		candidate.Roles[role] = rc
 	}
+	prepared, err := bootstrap.NewModelSet(candidate)
+	if err != nil {
+		return fmt.Errorf("应用推理强度失败: %w", err)
+	}
+	h.models.ApplyPrepared(prepared)
+	h.cfg = candidate
 	if h.configPath != "" {
-		if err := bootstrap.SaveConfig(h.configPath, h.cfg); err != nil {
+		if err := bootstrap.SaveEffectiveConfig(h.configPath, h.cfg); err != nil {
 			slog.Warn("保存配置失败", "module", "host", "err", err)
 		}
 	}
@@ -1572,7 +1606,7 @@ func (h *Host) ImportFrom(ctx context.Context, opts imp.Options) (<-chan imp.Eve
 
 	deps := imp.Deps{
 		Store:         h.store,
-		CommitChapter: tools.NewCommitChapterTool(h.store, h.styleStats),
+		CommitChapter: tools.NewImportCommitChapterTool(h.store, h.styleStats),
 		Segment:       h.importCaller("segment"),
 		Analyze:       h.importCaller("analyze"),
 		Synthesize:    h.importCaller("synthesize"),

@@ -21,6 +21,7 @@ func TestStartsForwardChapter(t *testing.T) {
 		{"返工 Writer", &Instruction{Agent: "writer", Chapter: 1}, &domain.Progress{Phase: domain.PhaseWriting, CompletedChapters: []int{1}, PendingRewrites: []int{1}}, nil, false},
 		{"章节恢复", &Instruction{Agent: "writer", Chapter: 2}, &domain.Progress{Phase: domain.PhaseWriting, CompletedChapters: []int{1}, InProgressChapter: 2}, nil, false},
 		{"提交恢复", &Instruction{Agent: "writer", Chapter: 2}, base, &domain.PendingCommit{Chapter: 2}, false},
+		{"Reviewer 未完成", &Instruction{Agent: "writer", Chapter: 2}, &domain.Progress{Phase: domain.PhaseWriting, CompletedChapters: []int{1}, PendingReviewChapter: 1}, nil, false},
 		{"非下一章", &Instruction{Agent: "writer", Chapter: 3}, base, nil, false},
 		{"Editor", &Instruction{Agent: "editor"}, base, nil, false},
 		{"空指令", nil, base, nil, false},
@@ -44,7 +45,9 @@ func TestResolveAdvanceHold(t *testing.T) {
 	}{
 		{"无 hold", nil, &domain.Progress{Phase: domain.PhaseWriting}, AdvanceHoldKeep, false},
 		{"边界暂停", &domain.AdvanceHold{After: domain.AdvanceHoldAtBoundary, Reason: "停"}, &domain.Progress{Phase: domain.PhaseWriting, PendingRewrites: []int{1}}, AdvanceHoldConsumeAndStop, false},
+		{"Reviewer 后再暂停", &domain.AdvanceHold{After: domain.AdvanceHoldAtBoundary, Reason: "停"}, &domain.Progress{Phase: domain.PhaseWriting, PendingReviewChapter: 1}, AdvanceHoldKeep, false},
 		{"返工未排空", &domain.AdvanceHold{After: domain.AdvanceHoldAfterRewritesDrained, Reason: "验收"}, &domain.Progress{Phase: domain.PhaseWriting, PendingRewrites: []int{1}}, AdvanceHoldKeep, false},
+		{"返工 Reviewer 未完成", &domain.AdvanceHold{After: domain.AdvanceHoldAfterRewritesDrained, Reason: "验收"}, &domain.Progress{Phase: domain.PhaseWriting, PendingReviewChapter: 1}, AdvanceHoldKeep, false},
 		{"返工已排空", &domain.AdvanceHold{After: domain.AdvanceHoldAfterRewritesDrained, Reason: "验收"}, &domain.Progress{Phase: domain.PhaseWriting}, AdvanceHoldConsumeAndStop, false},
 		{"完本只消费", &domain.AdvanceHold{After: domain.AdvanceHoldAtBoundary, Reason: "停"}, &domain.Progress{Phase: domain.PhaseComplete}, AdvanceHoldConsume, false},
 		{"未知条件", &domain.AdvanceHold{After: "unknown", Reason: "停"}, &domain.Progress{Phase: domain.PhaseWriting}, AdvanceHoldKeep, true},

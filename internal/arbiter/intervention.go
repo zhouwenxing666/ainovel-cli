@@ -197,7 +197,7 @@ func (d *InterventionDecision) ValidateAgainst(f InterventionFacts) error {
 }
 
 // validateDispatchAgainst 把提示词中的阶段纪律落实为机械防线。Architect 可在规划期
-// 与写作期维护结构；Writer/Editor 只能消费已经完整且进入 writing 的作品事实。
+// 与写作期维护结构；Writer/Reviewer/Editor 只能消费已经完整且进入 writing 的作品事实。
 func validateDispatchAgainst(dispatch *DispatchOp, phase string) error {
 	if dispatch == nil {
 		return nil
@@ -209,7 +209,7 @@ func validateDispatchAgainst(dispatch *DispatchOp, phase string) error {
 		return fmt.Errorf("完本期禁止直接派单")
 	}
 	switch dispatch.Agent {
-	case "writer", "editor":
+	case "writer", "reviewer", "editor":
 		if phase != string(domain.PhaseWriting) {
 			return fmt.Errorf("%s 仅能在 writing 阶段派发（当前 phase=%s）", dispatch.Agent, phase)
 		}

@@ -36,7 +36,7 @@ func validateValue(schema map[string]any, value any, path string) error {
 	if err != nil {
 		return fmt.Errorf("%s 契约非法: %w", path, err)
 	}
-	if value == nil && !slices.Contains(types, "null") {
+	if value == nil && len(types) > 0 && !slices.Contains(types, "null") {
 		return fmt.Errorf("%s 必须是 %s，实际为 null", path, joinTypes(types))
 	} else if value != nil {
 		actual := valueType(value)
@@ -62,7 +62,9 @@ func validateValue(schema map[string]any, value any, path string) error {
 	case map[string]any:
 		properties, ok := schema["properties"].(map[string]any)
 		if !ok {
-			return fmt.Errorf("%s 契约缺少 properties", path)
+			// JSON Schema 允许只写 description 的自由形状节点；没有
+			// properties 就不对对象成员施加额外约束。
+			return nil
 		}
 		required, err := requiredNames(schema["required"])
 		if err != nil {
@@ -96,7 +98,7 @@ func validateValue(schema map[string]any, value any, path string) error {
 	case []any:
 		itemSchema, ok := schema["items"].(map[string]any)
 		if !ok {
-			return fmt.Errorf("%s 契约缺少 items", path)
+			return nil
 		}
 		for i, item := range typed {
 			if err := validateValue(itemSchema, item, fmt.Sprintf("%s[%d]", path, i)); err != nil {

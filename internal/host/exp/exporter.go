@@ -129,12 +129,16 @@ func Run(ctx context.Context, deps Deps, opts Options) (*Result, error) {
 		locations = buildLocations(volumes)
 	}
 
+	// 作品简介存于 premise.md 的 `## 作品简介` 段落（初始化阶段生成），导出时从源头读取。
+	premise, _ := deps.Store.Outline.LoadPremise()
+	synopsis := strings.TrimSpace(domain.ExtractSynopsisFromPremise(premise))
+
 	var data []byte
 	switch opts.Format {
 	case FormatTXT:
-		data = []byte(renderTXT(progress.NovelName, chapters, titleIdx, locations, bodies))
+		data = []byte(renderTXT(progress.NovelName, chapters, titleIdx, locations, bodies, synopsis))
 	case FormatEPUB:
-		buf, err := renderEPUB(progress.NovelName, chapters, titleIdx, locations, bodies)
+		buf, err := renderEPUB(progress.NovelName, chapters, titleIdx, locations, bodies, synopsis)
 		if err != nil {
 			return nil, fmt.Errorf("渲染 EPUB 失败：%w", err)
 		}

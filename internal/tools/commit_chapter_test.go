@@ -18,6 +18,27 @@ func newTestCommitChapterTool(st *store.Store) *CommitChapterTool {
 	return NewCommitChapterTool(st, NewStyleStatsIndex(st))
 }
 
+func finishTestReviewer(t *testing.T, st *store.Store, chapter int) map[string]any {
+	t.Helper()
+	content, err := st.Drafts.LoadChapterText(chapter)
+	if err != nil || content == "" {
+		t.Fatalf("LoadChapterText(%d): content=%q err=%v", chapter, content, err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"chapter": chapter, "source_digest": chapterContentDigest(content),
+		"ai_patterns": []string{}, "humanized_content": "", "content": content,
+	})
+	raw, err := NewFinalizeReviewedChapterTool(st, NewStyleStatsIndex(st)).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("FinalizeReviewedChapter(%d): %v", chapter, err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal reviewer(%d): %v", chapter, err)
+	}
+	return out
+}
+
 func TestCommitChapterSchemaDescribesFeedbackAsObject(t *testing.T) {
 	tool := newTestCommitChapterTool(store.NewStore(t.TempDir()))
 	if !tool.StrictSchema() {
@@ -322,6 +343,51 @@ func TestCommitChapterRewriteRecoveryUsesFrozenDraft(t *testing.T) {
 	}
 }
 
+func TestCommitChapterRecoveryRestoresMissingReviewerFact(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("test", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.UpdatePhase(domain.PhaseWriting); err != nil {
+		t.Fatal(err)
+	}
+	const content = "# 第一章\n\n正文。"
+	if err := s.Drafts.SaveFinalChapter(1, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Summaries.SaveSummary(domain.ChapterSummary{Chapter: 1, Title: "第一章", Summary: "摘要"}); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟进程在 MarkChapterComplete 成功、RequireChapterReview 尚未落盘时崩溃。
+	if err := s.Progress.MarkChapterComplete(1, len([]rune(content)), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"chapter": 1, "title": "第一章", "summary": "摘要",
+		"characters": []string{}, "key_events": []string{},
+	})
+	if err := s.Signals.SavePendingCommit(domain.PendingCommit{
+		Chapter: 1, Stage: domain.CommitStageStateApplied, Payload: payload,
+		DraftContent: content, Summary: "摘要",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newTestCommitChapterTool(s).Execute(context.Background(), json.RawMessage(`{"chapter":1}`)); err != nil {
+		t.Fatalf("Execute recovery: %v", err)
+	}
+	p, err := s.Progress.Load()
+	if err != nil || p == nil {
+		t.Fatalf("load progress: %v", err)
+	}
+	if p.PendingReviewChapter != 1 {
+		t.Fatalf("recovery lost Reviewer quality gate: %+v", p)
+	}
+}
+
 // TestCommitChapterUpdatesCastLedger 验证：commit_chapter 把本章 characters 累加进 cast_ledger，
 // cast_intros 提供的 brief_role 被采用，且 characters.json 中的核心角色不进入 ledger。
 func TestCommitChapterUpdatesCastLedger(t *testing.T) {
@@ -619,8 +685,11 @@ func TestCommitChapterNonLayeredRecompletesAfterRework(t *testing.T) {
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if payload["book_complete"] != true {
-		t.Errorf("book_complete = %v, want true", payload["book_complete"])
+	if payload["book_complete"] == true {
+		t.Errorf("Writer commit 不得抢在 Reviewer 前完结: %v", payload["book_complete"])
+	}
+	if reviewed := finishTestReviewer(t, s, 2); reviewed["book_complete"] != true {
+		t.Errorf("Reviewer 后 book_complete = %v, want true", reviewed["book_complete"])
 	}
 
 	p, _ := s.Progress.Load()
@@ -708,8 +777,11 @@ func TestCommitChapterLayeredReopenRecompletesDespiteOpenThread(t *testing.T) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if bc, _ := out["book_complete"].(bool); !bc {
-		t.Error("reopen 返工排空后应按结构完整重新完结（即便长线未收束）")
+	if bc, _ := out["book_complete"].(bool); bc {
+		t.Error("返工 Writer commit 不得抢在 Reviewer 前重新完结")
+	}
+	if reviewed := finishTestReviewer(t, s, 2); reviewed["book_complete"] != true {
+		t.Error("Reviewer 后应按结构完整重新完结（即便长线未收束）")
 	}
 	p, _ := s.Progress.Load()
 	if p.Phase != domain.PhaseComplete {
@@ -963,10 +1035,14 @@ func TestCommitChapterLayeredAutoCompletesWhenDone(t *testing.T) {
 	if p, _ := s.Progress.Load(); p.Phase == domain.PhaseComplete {
 		t.Fatal("写完第 1 章 phase 不应为 complete")
 	}
+	finishTestReviewer(t, s, 1)
 
-	// 第 2 章（最后一章）：应自动完结
-	if bc, _ := commit(2)["book_complete"].(bool); !bc {
-		t.Fatal("写完最后一章应自动完结")
+	// 第 2 章（最后一章）：Writer 提交后先过 Reviewer，再自动完结
+	if bc, _ := commit(2)["book_complete"].(bool); bc {
+		t.Fatal("末章 Writer commit 不得抢在 Reviewer 前完结")
+	}
+	if bc, _ := finishTestReviewer(t, s, 2)["book_complete"].(bool); !bc {
+		t.Fatal("末章 Reviewer 完成后应自动完结")
 	}
 	if p, _ := s.Progress.Load(); p.Phase != domain.PhaseComplete {
 		t.Fatalf("expected phase=complete, got %s", p.Phase)
@@ -1060,12 +1136,16 @@ func TestCommitChapterFinaleVolumeCompletesDespiteOpenThreads(t *testing.T) {
 	if bc, _ := commit(1)["book_complete"].(bool); bc {
 		t.Fatal("收官卷尚未写完不应完结")
 	}
+	finishTestReviewer(t, s, 1)
 	// 第 2 章（收官卷末章）：卷末收尾三连未齐，完结不得抢在 editor 评审/摘要之前
 	if bc, _ := commit(2)["book_complete"].(bool); bc {
 		t.Fatal("末章 commit 时三连未齐，不应完结")
 	}
 	if p, _ := s.Progress.Load(); p.Phase == domain.PhaseComplete {
 		t.Fatal("完结不应发生在卷末评审与摘要之前")
+	}
+	if bc, _ := finishTestReviewer(t, s, 2)["book_complete"].(bool); bc {
+		t.Fatal("收官卷 Reviewer 后三连未齐，仍不应完结")
 	}
 
 	// 卷末收尾三连：弧评审 + 弧摘要落盘后，卷摘要（save_volume_summary）是完结触发点

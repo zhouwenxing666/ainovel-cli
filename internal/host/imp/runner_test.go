@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/store"
 	"github.com/voocel/ainovel-cli/internal/tools"
 )
@@ -17,7 +18,7 @@ func testDeps(st *store.Store, m callModel) Deps {
 	c := Caller{Model: m}
 	return Deps{
 		Store:         st,
-		CommitChapter: tools.NewCommitChapterTool(st, tools.NewStyleStatsIndex(st)),
+		CommitChapter: tools.NewImportCommitChapterTool(st, tools.NewStyleStatsIndex(st)),
 		Segment:       c,
 		Analyze:       c,
 		Synthesize:    c,
@@ -69,6 +70,8 @@ func TestRunEndToEnd(t *testing.T) {
 	// 正式状态就绪：premise 与覆盖全章的扁平大纲已落盘（world_rules 合法为空，不做要求）。
 	if p, _ := st.Outline.LoadPremise(); p == "" {
 		t.Fatal("premise 未落盘")
+	} else if synopsis := domain.ExtractSynopsisFromPremise(p); synopsis == "" {
+		t.Fatalf("导入发布的 premise 缺少作品简介：%q", p)
 	}
 	if o, _ := st.Outline.LoadOutline(); len(o) != 2 {
 		t.Fatalf("扁平大纲应覆盖 2 章，得 %d", len(o))

@@ -54,6 +54,7 @@ type UISnapshot struct {
 	TotalWordCount       int
 	InProgressChapter    int
 	PendingRewrites      []int
+	PendingReviewChapter int
 	RewriteReason        string
 	PendingSteer         string
 	AdvanceMode          string
@@ -81,8 +82,11 @@ type UISnapshot struct {
 	TotalCacheReadTokens  int
 	TotalCacheWriteTokens int
 	TotalCostUSD          float64
-	TotalSavedUSD         float64 // 因 CacheRead 命中省下的美元（相对全按非缓存输入价计费）
-	BudgetLimitUSD        float64 // 预算上限（config budget.book_usd）；0 = 未启用
+	// CostUnavailable means the total includes saved-login calls whose USD
+	// price is not known. TotalCostUSD remains the priced HTTP portion.
+	CostUnavailable bool
+	TotalSavedUSD   float64 // 因 CacheRead 命中省下的美元（相对全按非缓存输入价计费）
+	BudgetLimitUSD  float64 // 预算上限（config budget.book_usd）；0 = 未启用
 
 	// 缓存诊断
 	OverallCacheCapable    bool // 至少一个 role 跑过支持 prompt cache 的模型（区分"未启用"和"0% 命中"）
@@ -158,6 +162,7 @@ type AgentCacheStat struct {
 	Cost            float64
 	Saved           float64
 	CacheCapable    bool
+	CostUnavailable bool
 	RecentCacheRead int
 	RecentInput     int
 	RecentSamples   int

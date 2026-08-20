@@ -36,9 +36,10 @@ type modelRoleOption struct {
 
 var modelRoleOptions = []modelRoleOption{
 	{Key: "default", Label: "默认"},
-
+	{Key: "arbiter", Label: "Arbiter"},
 	{Key: "architect", Label: "Architect"},
 	{Key: "writer", Label: "Writer"},
+	{Key: "reviewer", Label: "Reviewer"},
 	{Key: "editor", Label: "Editor"},
 }
 
@@ -123,7 +124,7 @@ func normalizeRoleKey(role string) string {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "", "default":
 		return "default"
-	case "architect", "writer", "editor":
+	case "arbiter", "architect", "writer", "reviewer", "editor":
 		return strings.ToLower(strings.TrimSpace(role))
 	default:
 		return ""

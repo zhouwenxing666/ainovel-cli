@@ -7,8 +7,50 @@ import (
 	"testing"
 
 	"github.com/voocel/agentcore"
+	"github.com/voocel/ainovel-cli/internal/bootstrap"
 	"github.com/voocel/ainovel-cli/internal/models"
 )
+
+func TestUsageTrackerDoesNotPriceSavedLoginCodexTokensAsAPI(t *testing.T) {
+	set, err := bootstrap.NewModelSet(bootstrap.Config{
+		Provider: "local", ModelName: "gpt-5.4",
+		Providers: map[string]bootstrap.ProviderConfig{
+			"local": {Driver: "codex_cli", Command: "codex"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := NewUsageTracker(set, nil)
+	cost, saved, capable := tracker.resolveCost("gpt-5.4", agentcore.Usage{
+		Provider: "local", Model: "gpt-5.4", Input: 1_000_000, Output: 1_000_000,
+	})
+	if cost != 0 || saved != 0 || capable {
+		t.Fatalf("subscription usage must remain unpriced, got cost=%f saved=%f capable=%v", cost, saved, capable)
+	}
+	tracker.Record("arbiter", "decision", agentcore.Message{
+		Role: agentcore.RoleAssistant,
+		Usage: &agentcore.Usage{
+			Provider: "local", Model: "gpt-5.4", Input: 1000, Output: 200,
+		},
+	})
+	if usage := tracker.PerAgent(); len(usage) != 1 || !usage[0].CostUnavailable {
+		t.Fatalf("Codex saved-login usage must carry the N/A marker: %+v", usage)
+	}
+	if models := tracker.PerModel(); len(models) != 1 || !models[0].CostUnavailable {
+		t.Fatalf("Codex model usage must carry the N/A marker: %+v", models)
+	}
+	snapshot := tracker.Snapshot()
+	if !snapshot.Overall.CostUnavailable {
+		t.Fatalf("unpriced marker must survive persistence snapshot: %+v", snapshot.Overall)
+	}
+	// Older session rows may carry provider/model only in _meta. The effective
+	// provider must still suppress registry pricing during replay.
+	tracker.accumulate("arbiter", "local", "gpt-5.4", agentcore.Usage{Input: 1_000_000, Output: 1_000_000})
+	if total, _, _, _, _ := tracker.Totals(); total != 0 {
+		t.Fatalf("metadata-identified Codex replay was priced as API usage: %f", total)
+	}
+}
 
 func TestUsageTrackerReplaySessionsReadsWorkerLogs(t *testing.T) {
 	dir := t.TempDir()

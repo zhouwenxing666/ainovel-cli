@@ -159,6 +159,7 @@ func (t *ReadChapterTool) Execute(_ context.Context, args json.RawMessage) (json
 		"source":     a.Source,
 		"content":    content,
 		"word_count": len([]rune(content)),
+		"digest":     chapterContentDigest(content),
 	})
 }
 

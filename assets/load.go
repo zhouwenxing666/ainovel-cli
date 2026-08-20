@@ -29,6 +29,7 @@ type Prompts struct {
 	ArchitectShort   string
 	ArchitectLong    string
 	Writer           string // 协议模板,含 {{VOICE}} 占位符;终稿经 BuildWriterPrompt 组装
+	Reviewer         string
 	Editor           string
 	ImportSegment    string // 语义切分：识别章节/卷/附属文本边界
 	ImportAnalyze    string // 连续批次逐章事实提取
@@ -177,6 +178,7 @@ func loadPrompts() Prompts {
 		ArchitectShort:   WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-short.md"), "architect"),
 		ArchitectLong:    WithSimulationGuidance(mustRead(promptsFS, "prompts/architect-long.md"), "architect"),
 		Writer:           WithSimulationGuidance(mustRead(promptsFS, "prompts/writer.md"), "writer"),
+		Reviewer:         WithSimulationGuidance(mustRead(promptsFS, "prompts/reviewer.md"), "reviewer"),
 		Editor:           WithSimulationGuidance(mustRead(promptsFS, "prompts/editor.md"), "editor"),
 		ImportSegment:    mustRead(promptsFS, "prompts/import-segment.md"),
 		ImportAnalyze:    mustRead(promptsFS, "prompts/import-analyze.md"),
@@ -215,6 +217,8 @@ func (b *Bundle) OverridePrompt(file, raw string) error {
 		b.Prompts.ArchitectLong = wrapped
 	case "writer.md":
 		b.Prompts.Writer = wrapped
+	case "reviewer.md":
+		b.Prompts.Reviewer = wrapped
 	case "editor.md":
 		b.Prompts.Editor = wrapped
 	}
@@ -226,6 +230,7 @@ var promptRole = map[string]string{
 	"architect-short.md": "architect",
 	"architect-long.md":  "architect",
 	"writer.md":          "writer",
+	"reviewer.md":        "reviewer",
 	"editor.md":          "editor",
 }
 

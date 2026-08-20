@@ -31,7 +31,7 @@ func TestUsageStore_RoundTrip(t *testing.T) {
 	in := domain.UsageState{
 		Overall: domain.AgentUsageTotals{
 			Input: 12000, Output: 3400, CacheRead: 8000, CacheWrite: 1500,
-			Cost: 1.234, Saved: 0.5, CacheCapable: true,
+			Cost: 1.234, Saved: 0.5, CacheCapable: true, CostUnavailable: true,
 		},
 		PerAgent: map[string]domain.AgentUsageTotals{
 			"writer": {Input: 10000, Output: 3000, CacheRead: 7500, Cost: 1.0, CacheCapable: true},

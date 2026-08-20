@@ -41,8 +41,8 @@ func renderStatusBar(snap host.UISnapshot, outputDir string, width int) string {
 		}
 		segs = append(segs, s)
 	}
-	if snap.TotalCostUSD > 0 || snap.BudgetLimitUSD > 0 {
-		cost := formatCostUSD(snap.TotalCostUSD)
+	if snap.TotalCostUSD > 0 || snap.BudgetLimitUSD > 0 || snap.CostUnavailable {
+		cost := formatUsageCost(snap.TotalCostUSD, snap.CostUnavailable)
 		if cost == "" {
 			cost = "$0"
 		}
@@ -59,6 +59,9 @@ func renderStatusBar(snap host.UISnapshot, outputDir string, width int) string {
 		s := style.Render(cost)
 		if snap.BudgetLimitUSD > 0 {
 			s += dim.Render("/" + formatCostUSD(snap.BudgetLimitUSD))
+			if snap.CostUnavailable {
+				s += dim.Render(" API-only")
+			}
 		}
 		if saved := formatCostUSD(snap.TotalSavedUSD); saved != "" {
 			s += dim.Render(" 省" + saved)

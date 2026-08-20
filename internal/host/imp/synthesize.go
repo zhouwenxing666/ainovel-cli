@@ -19,8 +19,8 @@ const (
 // synthesisSchemaVersion 纳入 RangeDigest / synthesis InputDigest，升级综合契约时递增以失效已落盘工件。
 // synthesizePromptVersion 纳入 synthesis InputDigest，改综合 prompt 时递增，否则旧 synthesis 仍被误判有效。
 const (
-	synthesisSchemaVersion  = 2
-	synthesizePromptVersion = "synthesize-v2"
+	synthesisSchemaVersion  = 3
+	synthesizePromptVersion = "synthesize-v3"
 	rangePromptVersion      = "range-v2" // 纳入 rangeInputDigest，改 Range prompt 时递增，否则旧区间摘要仍被误判有效
 )
 
@@ -41,6 +41,7 @@ type ImportedVolumeRange struct {
 // BookSynthesis 是最终综合结果：全局事实 + 卷弧范围（RFC §10.3）。
 type BookSynthesis struct {
 	Premise      string                `json:"premise"`
+	Synopsis     string                `json:"synopsis"`
 	Characters   []domain.Character    `json:"characters"`
 	WorldRules   []domain.WorldRule    `json:"world_rules"`
 	Structure    []ImportedVolumeRange `json:"structure"`
@@ -271,13 +272,16 @@ func buildRangePayload(facts []ImportedChapterFacts) string {
 }
 
 func buildBookPayload(inner string, n int) string {
-	return fmt.Sprintf("以下是全书 %d 章的紧凑事实/区间摘要。请生成 BookSynthesis：premise、characters、world_rules、卷弧范围 structure、compass、planning_tier、story_status。\n\n%s", n, inner)
+	return fmt.Sprintf("以下是全书 %d 章的紧凑事实/区间摘要。请生成 BookSynthesis：premise、synopsis、characters、world_rules、卷弧范围 structure、compass、planning_tier、story_status。\n\n%s", n, inner)
 }
 
 // validateSynthesis 校验综合结果的结构约束（值域/闭集/范围），不复判文学质量。
 func validateSynthesis(s *BookSynthesis, n int) error {
 	if strings.TrimSpace(s.Premise) == "" {
 		return fmt.Errorf("premise 为空")
+	}
+	if strings.TrimSpace(s.Synopsis) == "" {
+		return fmt.Errorf("synopsis 为空")
 	}
 	if len(s.Characters) == 0 {
 		return fmt.Errorf("characters 为空")
@@ -392,7 +396,7 @@ func AssembleFoundation(s *BookSynthesis, facts []ImportedChapterFacts, closed b
 		}
 	}
 
-	premise := ensurePremiseTitle(s.Premise, fallbackName)
+	premise := ensurePremiseSynopsis(ensurePremiseTitle(s.Premise, fallbackName), s.Synopsis)
 	return &Foundation{
 		PlanningTier: s.PlanningTier,
 		Premise:      premise,
@@ -402,6 +406,43 @@ func AssembleFoundation(s *BookSynthesis, facts []ImportedChapterFacts, closed b
 		Compass:      s.Compass,
 		Closed:       closed,
 	}, nil
+}
+
+// ensurePremiseSynopsis 把结构化综合结果中的读者向简介写入 premise 的固定段落。
+// 若模型在自由格式 premise 中也生成了同名段落，以独立 synopsis 字段为准并规范成二级标题，
+// 避免导出器读到旧内容或重复段落。
+func ensurePremiseSynopsis(premise, synopsis string) string {
+	premise = strings.TrimSpace(strings.ReplaceAll(premise, "\r\n", "\n"))
+	synopsis = strings.TrimSpace(synopsis)
+	lines := strings.Split(premise, "\n")
+
+	start, end := -1, len(lines)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		level := len(trimmed) - len(strings.TrimLeft(trimmed, "#"))
+		if level >= 2 && strings.TrimSpace(strings.TrimLeft(trimmed, "#")) == "作品简介" {
+			start = i
+			for j := i + 1; j < len(lines); j++ {
+				if strings.HasPrefix(strings.TrimSpace(lines[j]), "#") {
+					end = j
+					break
+				}
+			}
+			break
+		}
+	}
+
+	if start < 0 {
+		return premise + "\n\n## 作品简介\n" + synopsis
+	}
+
+	out := append([]string{}, lines[:start]...)
+	out = append(out, "## 作品简介", synopsis)
+	if end < len(lines) {
+		out = append(out, "")
+		out = append(out, lines[end:]...)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 // ensurePremiseTitle 保证 premise 以书名标题行开头；正文无法确认书名时用文件 basename 作推断标题（RFC §11.1）。

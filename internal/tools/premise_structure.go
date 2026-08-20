@@ -25,6 +25,7 @@ var premiseHeadingAliases = map[string]string{
 	"终局命题":    "终局命题",
 	"短篇适配性":   "短篇适配性",
 	"本作为什么适合短篇/单卷收束": "短篇适配性",
+	"作品简介": "作品简介",
 }
 
 func parsePremiseSections(premise string) map[string]string {
@@ -106,6 +107,7 @@ func requiredPremiseHeadings(tier domain.PlanningTier) []string {
 		"差异化卖点",
 		"差异化钩子",
 		"核心兑现承诺",
+		"作品简介",
 	}
 
 	switch tier {

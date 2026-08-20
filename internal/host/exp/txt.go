@@ -99,6 +99,7 @@ func renderTXT(
 	titleIdx chapterTitleIndex,
 	locations map[int]chapterLocation,
 	bodies map[int]string,
+	synopsis string,
 ) string {
 	var b strings.Builder
 
@@ -106,6 +107,10 @@ func renderTXT(
 		b.WriteString("《")
 		b.WriteString(name)
 		b.WriteString("》\n\n")
+	}
+	if s := strings.TrimSpace(synopsis); s != "" {
+		b.WriteString(s)
+		b.WriteString("\n\n")
 	}
 
 	useLayered := len(locations) > 0

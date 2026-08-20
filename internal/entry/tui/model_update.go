@@ -574,6 +574,8 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			m.modelConfig.message = "连接测试已取消"
 		} else if msg.err != nil {
 			m.modelConfig.message = msg.err.Error()
+		} else if m.modelConfig.driver == "codex_cli" {
+			m.modelConfig.message = "Codex CLI 预检成功：版本、登录与隔离能力正常"
 		} else {
 			m.modelConfig.message = "连接测试成功：" + msg.model
 		}

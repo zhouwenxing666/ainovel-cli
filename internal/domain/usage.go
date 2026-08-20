@@ -30,6 +30,10 @@ type AgentUsageTotals struct {
 	Cost         float64 `json:"cost_usd"`
 	Saved        float64 `json:"saved_usd"`
 	CacheCapable bool    `json:"cache_capable"`
+	// CostUnavailable means at least one included call has token telemetry but
+	// no verifiable API-dollar price (for example a saved-login Codex CLI call).
+	// Cost remains the sum of any priced HTTP calls in the same aggregate.
+	CostUnavailable bool `json:"cost_unavailable,omitempty"`
 	// CacheBreaks 是 live 检测到的缓存链断裂次数（前缀未缩短而命中骤降）。
 	// 只在实时路径累计，session replay 不重放检测。
 	CacheBreaks int `json:"cache_breaks,omitempty"`

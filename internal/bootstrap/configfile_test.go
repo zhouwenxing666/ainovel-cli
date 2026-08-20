@@ -146,6 +146,59 @@ func TestLoadConfig_ValidMergeWorks(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_AppliesLocalCodexDefaults(t *testing.T) {
+	writeGlobal(t, `{
+  "provider": "local-codex",
+  "providers": {
+    "local-codex": { "driver": "codex_cli", "command": "codex" }
+  }
+}`)
+	t.Chdir(t.TempDir())
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("load existing Local Codex config: %v", err)
+	}
+	if cfg.ModelName != "gpt-5.6-sol" {
+		t.Fatalf("migrated Codex model = %q, want gpt-5.6-sol", cfg.ModelName)
+	}
+	if cfg.ReasoningEffort != "xhigh" {
+		t.Fatalf("migrated Codex reasoning effort = %q, want xhigh", cfg.ReasoningEffort)
+	}
+	models := cfg.Providers["local-codex"].Models
+	if len(models) != 1 || models[0].Name != "gpt-5.6-sol" {
+		t.Fatalf("migrated Codex models = %#v, want gpt-5.6-sol", models)
+	}
+}
+
+func TestLoadConfig_PreservesExplicitLocalCodexSelection(t *testing.T) {
+	writeGlobal(t, `{
+  "provider": "local-codex",
+  "model": "gpt-custom",
+  "reasoning_effort": "high",
+  "providers": {
+    "local-codex": {
+      "driver": "codex_cli",
+      "command": "codex",
+      "models": [{ "name": "gpt-custom" }]
+    }
+  }
+}`)
+	t.Chdir(t.TempDir())
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("load explicit Local Codex config: %v", err)
+	}
+	if cfg.ModelName != "gpt-custom" || cfg.ReasoningEffort != "high" {
+		t.Fatalf("explicit Codex selection was overwritten: model=%q reasoning=%q", cfg.ModelName, cfg.ReasoningEffort)
+	}
+	models := cfg.Providers["local-codex"].Models
+	if len(models) != 1 || models[0].Name != "gpt-custom" {
+		t.Fatalf("explicit Codex model catalog was overwritten: %#v", models)
+	}
+}
+
 func TestMergeConfig_ProviderExtraFields(t *testing.T) {
 	base := Config{
 		Provider:  "openrouter",
@@ -207,6 +260,97 @@ func TestMergeConfig_ProviderExtraFields(t *testing.T) {
 	}
 	if got := headers["X-Custom-Client"]; got != "ainovel" {
 		t.Fatalf("Extra.headers[X-Custom-Client] = %#v, want ainovel", got)
+	}
+}
+
+func TestMergeConfig_ProjectCannotOverrideCodexProcessBoundary(t *testing.T) {
+	base := Config{
+		Providers: map[string]ProviderConfig{
+			"local": {
+				Driver:            "codex_cli",
+				Command:           "/trusted/bin/codex",
+				CodexHome:         "/trusted/codex-home",
+				SingleCallTimeout: "3m",
+				WorkerTimeout:     "30m",
+				Models:            []ModelConfig{{Name: "gpt-5.3-codex"}},
+			},
+		},
+		Roles: map[string]RoleConfig{
+			"writer": {Provider: "local", Model: "gpt-5.3-codex", Timeout: "25m"},
+		},
+	}
+	overlay := Config{
+		Providers: map[string]ProviderConfig{
+			"local": {
+				Driver:            "",
+				Command:           "/tmp/evil-codex",
+				CodexHome:         "/tmp/evil-home",
+				SingleCallTimeout: "1s",
+				WorkerTimeout:     "2s",
+				Models:            []ModelConfig{{Name: "gpt-5.4-codex"}},
+			},
+		},
+		Roles: map[string]RoleConfig{
+			"writer": {Provider: "local", Model: "gpt-5.4-codex", Timeout: "10m"},
+		},
+	}
+
+	merged := mergeConfig(base, overlay)
+	pc := merged.Providers["local"]
+	if pc.Driver != "codex_cli" || pc.Command != "/trusted/bin/codex" || pc.CodexHome != "/trusted/codex-home" {
+		t.Fatalf("项目配置越过 Codex 进程信任边界: %#v", pc)
+	}
+	if pc.SingleCallTimeout != "3m" || pc.WorkerTimeout != "30m" {
+		t.Fatalf("项目配置不应覆盖 provider 级进程超时: %#v", pc)
+	}
+	if got := pc.Models[0].Name; got != "gpt-5.4-codex" {
+		t.Fatalf("项目配置应可覆盖安全的模型候选，得到 %q", got)
+	}
+	if got := merged.Roles["writer"].Timeout; got != "10m" {
+		t.Fatalf("项目配置应可覆盖角色任务超时，得到 %q", got)
+	}
+}
+
+func TestMergeConfig_ProviderStreamIdleTimeout(t *testing.T) {
+	base := Config{Providers: map[string]ProviderConfig{
+		"openrouter": {APIKey: "sk-test", StreamIdleTimeout: "5m"},
+	}}
+	overlay := Config{Providers: map[string]ProviderConfig{
+		"openrouter": {StreamIdleTimeout: "15m"},
+	}}
+
+	if got := mergeConfig(base, overlay).Providers["openrouter"].StreamIdleTimeout; got != "15m" {
+		t.Fatalf("stream_idle_timeout = %q, want 15m", got)
+	}
+}
+
+func TestSaveEffectiveConfigStripsCodexProcessFieldsFromProject(t *testing.T) {
+	writeGlobal(t, validGlobal)
+	project := t.TempDir()
+	path := filepath.Join(project, ".ainovel", "config.json")
+	cfg := Config{
+		Provider: "local", ModelName: "gpt-test",
+		Providers: map[string]ProviderConfig{
+			"local": {
+				Driver: "codex_cli", Command: "/trusted/codex", CodexHome: "/trusted/home",
+				SingleCallTimeout: "3m", WorkerTimeout: "30m",
+				Models: []ModelConfig{{Name: "gpt-test"}},
+			},
+		},
+	}
+	if err := SaveEffectiveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := saved.Providers["local"]
+	if provider.Driver != "" || provider.Command != "" || provider.CodexHome != "" || provider.SingleCallTimeout != "" || provider.WorkerTimeout != "" {
+		t.Fatalf("project file contains trusted process fields: %#v", provider)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-test" {
+		t.Fatalf("safe model overlay was lost: %#v", provider)
 	}
 }
 

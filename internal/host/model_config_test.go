@@ -4,12 +4,81 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/voocel/ainovel-cli/internal/bootstrap"
 )
+
+func TestConfigureCodexProviderKeepsProcessBoundaryGlobal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := filepath.Join(home, "fake-codex")
+	script := `#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "codex-cli 0.147.0"; exit 0; fi
+if [ "${1:-}" = "exec" ] && [ "${2:-}" = "--help" ]; then
+  echo --json --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --output-schema --output-last-message --sandbox --cd --disable
+  exit 0
+fi
+if [ "${1:-}" = "features" ] && [ "${2:-}" = "list" ]; then
+  echo shell_tool unified_exec shell_snapshot apps plugins hooks browser_use browser_use_external browser_use_full_cdp_access computer_use image_generation view_image standalone_web_search web_search_cached code_mode code_mode_host multi_agent multi_agent_v2 enable_fanout
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	provider := bootstrap.ProviderConfig{
+		Driver: "codex_cli", Command: command, CodexHome: codexHome,
+		Models: []bootstrap.ModelConfig{{Name: "gpt-test"}},
+	}
+	cfg := bootstrap.Config{
+		Provider: "local", ModelName: "gpt-test",
+		Providers: map[string]bootstrap.ProviderConfig{"local": provider},
+	}
+	models, err := bootstrap.NewModelSet(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(t.TempDir(), ".ainovel", "config.json")
+	if err := bootstrap.SaveConfig(projectPath, bootstrap.ProjectSafeConfig(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	h := &Host{cfg: cfg, models: models, events: make(chan Event, 2), configPath: projectPath}
+	if err := h.ConfigureModels(ModelConfigurationDraft{
+		Provider: "local", Driver: "codex_cli", Command: command, CodexHome: codexHome,
+		SingleCallTimeout: "2m", WorkerTimeout: "20m",
+		Models: []bootstrap.ModelConfig{{Name: "gpt-test"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	global, err := bootstrap.LoadConfigFile(bootstrap.DefaultConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := global.Providers["local"]
+	if trusted.Driver != "codex_cli" || trusted.Command != command || trusted.CodexHome != codexHome {
+		t.Fatalf("global Codex boundary = %#v", trusted)
+	}
+	project, err := bootstrap.LoadConfigFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay := project.Providers["local"]
+	if overlay.Driver != "" || overlay.Command != "" || overlay.CodexHome != "" || overlay.SingleCallTimeout != "" || overlay.WorkerTimeout != "" {
+		t.Fatalf("project persisted trusted Codex process fields: %#v", overlay)
+	}
+}
 
 func newModelConfigTestHost(t *testing.T) (*Host, string) {
 	t.Helper()

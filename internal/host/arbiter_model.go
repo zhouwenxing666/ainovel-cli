@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"time"
 
 	"github.com/voocel/agentcore"
 	"github.com/voocel/agentcore/llm"
@@ -74,3 +75,9 @@ func (m *usageTrackedModel) GenerateStream(ctx context.Context, msgs []agentcore
 }
 
 func (m *usageTrackedModel) SupportsTools() bool { return m.inner.SupportsTools() }
+func (m *usageTrackedModel) OverallTimeout() time.Duration {
+	if provider, ok := m.inner.(interface{ OverallTimeout() time.Duration }); ok {
+		return provider.OverallTimeout()
+	}
+	return 0
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "install_ainovel_cli_byhost"
+  short_description: "安全重装本仓库最新 ainovel-cli 到本机"
+  default_prompt: "Use $install-ainovel-cli-byhost to uninstall the current host binary and reinstall ainovel-cli from this repository’s latest local code."
