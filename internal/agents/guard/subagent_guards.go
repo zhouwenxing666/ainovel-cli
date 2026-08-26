@@ -158,7 +158,7 @@ func writerBlockMsg(seen map[string]struct{}) string {
 func NewArchitectStopGuard(st *store.Store, onBlock BlockHook) agentcore.StopGuard {
 	return newCheckpointDeltaGuard(st, "architect",
 		[]string{
-			"premise", "outline", "layered_outline", "characters", "world_rules",
+			"premise", "outline", "layered_outline", "characters", "world_rules", "cover_prompt",
 			"foundation_audit", "expand_arc", "append_volume", "update_compass", "complete_book", "revise_outline",
 		},
 		staticBlockMsg("你必须调用 save_foundation、revise_outline 或 audit_foundation 将产出落盘后才能结束。只输出 Markdown/JSON 文字等于丢失。"),

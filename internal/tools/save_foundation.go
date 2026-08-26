@@ -13,7 +13,7 @@ import (
 	"github.com/voocel/ainovel-cli/internal/store"
 )
 
-// SaveFoundationTool 保存基础设定（premise/outline/characters），Architect 专用。
+// SaveFoundationTool 保存基础设定，Architect 专用。
 type SaveFoundationTool struct {
 	store *store.Store
 }
@@ -24,7 +24,7 @@ func NewSaveFoundationTool(store *store.Store) *SaveFoundationTool {
 
 func (t *SaveFoundationTool) Name() string { return "save_foundation" }
 func (t *SaveFoundationTool) Description() string {
-	return "保存小说基础设定（premise/outline/characters/world_rules/compass 等）。**这是唯一持久化入口**：未经此工具调用保存的内容不会进入 store，只在消息里输出 Markdown/JSON 等于丢失。参数固定为 {type, content, scale?, volume?, arc?}。type 可选 premise / outline / layered_outline / characters / world_rules / expand_arc / append_volume / update_compass / complete_book。premise 时 content 必须是 Markdown 字符串；其他类型 content 优先直接传 JSON 数组或对象。expand_arc 校准并展开一个未写骨架弧（需 volume + arc，content 为 {title, goal, chapters}，可依据已完成正文修订原骨架目标）；append_volume 追加新卷（content 为完整 VolumeOutline JSON，含弧结构；顶层带 \"final\": true 即宣告收官卷——全书在该卷收束，所有章节写完后自动完结，无需再调 complete_book）；update_compass 更新终局方向（content 为 StoryCompass JSON）；complete_book 宣告全书完结（content 传空对象 {}，直接推 Phase=Complete；工具会校验：大纲内章节已全部写完、无返工队列、compass 无未收束 open_threads——确认长线已收束须先 update_compass 清空 open_threads 落盘，想提前收束用 append_volume 的 final 收官卷）。append_volume / complete_book 必须带 reason 参数（一句话判定理由，对照完结判定清单，记入裁定审计）。scale 可选，仅允许 short / mid / long。"
+	return "保存小说基础设定（premise/outline/characters/world_rules/cover_prompt/compass 等）。**这是唯一持久化入口**：未经此工具调用保存的内容不会进入 store，只在消息里输出 Markdown/JSON 等于丢失。参数固定为 {type, content, scale?, volume?, arc?}。type 可选 premise / outline / layered_outline / characters / world_rules / cover_prompt / expand_arc / append_volume / update_compass / complete_book。premise 时 content 必须是 Markdown 字符串；cover_prompt 时 content 传 {prompts:[...恰好5项]}，每项包含 title、genre_tone、subject、background、primary_colors、text_position，代码校验后以固定模板写入 premise.md；其他类型 content 优先直接传 JSON 数组或对象。expand_arc 校准并展开一个未写骨架弧（需 volume + arc，content 为 {title, goal, chapters}，可依据已完成正文修订原骨架目标）；append_volume 追加新卷（content 为完整 VolumeOutline JSON，含弧结构；顶层带 \"final\": true 即宣告收官卷——全书在该卷收束，所有章节写完后自动完结，无需再调 complete_book）；update_compass 更新终局方向（content 为 StoryCompass JSON）；complete_book 宣告全书完结（content 传空对象 {}，直接推 Phase=Complete；工具会校验：大纲内章节已全部写完、无返工队列、compass 无未收束 open_threads——确认长线已收束须先 update_compass 清空 open_threads 落盘，想提前收束用 append_volume 的 final 收官卷）。append_volume / complete_book 必须带 reason 参数（一句话判定理由，对照完结判定清单，记入裁定审计）。scale 可选，仅允许 short / mid / long。"
 }
 func (t *SaveFoundationTool) Label() string { return "保存设定" }
 
@@ -34,9 +34,9 @@ func (t *SaveFoundationTool) ConcurrencySafe(_ json.RawMessage) bool { return fa
 
 func (t *SaveFoundationTool) Schema() map[string]any {
 	return schema.Object(
-		schema.Property("type", schema.Enum("设定类型", "premise", "outline", "layered_outline", "characters", "world_rules", "expand_arc", "append_volume", "update_compass", "complete_book")).Required(),
+		schema.Property("type", schema.Enum("设定类型", "premise", "outline", "layered_outline", "characters", "world_rules", "cover_prompt", "expand_arc", "append_volume", "update_compass", "complete_book")).Required(),
 		schema.Property("content", map[string]any{
-			"description": "内容。premise 传 Markdown 字符串；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。expand_arc 时传 {title, goal, chapters}，title/goal 是结合已完成事实校准后的目标弧规划。",
+			"description": "内容。premise 传 Markdown 字符串；cover_prompt 传 {prompts:[{title,genre_tone,subject,background,primary_colors,text_position}]}（恰好五项，第一项为正式书名，后四项为互异且15字以内的候选中文书名）；其他类型直接传 JSON 数组或对象即可，也兼容传 JSON 字符串。expand_arc 时传 {title, goal, chapters}，title/goal 是结合已完成事实校准后的目标弧规划。",
 		}).Required(),
 		schema.Property("scale", schema.Enum("规划级别", "short", "mid", "long")),
 		schema.Property("volume", schema.Int("目标卷序号（仅 expand_arc 时必传）")),
@@ -207,6 +207,32 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 		}
 		result["count"] = len(rules)
 
+	case "cover_prompt":
+		premise, err := t.store.Outline.LoadPremise()
+		if err != nil {
+			return nil, fmt.Errorf("load premise for cover prompt: %w: %w", errs.ErrStoreRead, err)
+		}
+		name := domain.ExtractNovelNameFromPremise(premise)
+		if name == "" {
+			return nil, fmt.Errorf("生成封面提示词前 premise 第一行必须包含真实书名（# 实际书名）: %w", errs.ErrToolPrecondition)
+		}
+		var prompts domain.CoverPromptSet
+		if err := decode("cover_prompt", &prompts); err != nil {
+			return nil, err
+		}
+		if err := domain.ValidateCoverPromptSet(prompts, name); err != nil {
+			return nil, fmt.Errorf("validate cover_prompt: %w: %w", errs.ErrToolArgs, err)
+		}
+		if err := t.store.Outline.SaveCoverPromptSet(prompts); err != nil {
+			return nil, fmt.Errorf("save cover_prompt: %w: %w", errs.ErrStoreWrite, err)
+		}
+		result["count"] = len(prompts.Prompts)
+		candidates := make([]string, 0, 4)
+		for _, prompt := range prompts.Prompts[1:] {
+			candidates = append(candidates, prompt.Title)
+		}
+		result["candidate_titles"] = candidates
+
 	case "expand_arc":
 		if a.Volume <= 0 || a.Arc <= 0 {
 			return nil, fmt.Errorf("expand_arc requires volume and arc parameters: %w", errs.ErrToolArgs)
@@ -331,7 +357,7 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 		t.consumeWriterFeedback()
 
 	default:
-		return nil, fmt.Errorf("unknown type %q, expected premise/outline/layered_outline/characters/world_rules/expand_arc/append_volume/update_compass/complete_book: %w", a.Type, errs.ErrToolArgs)
+		return nil, fmt.Errorf("unknown type %q, expected premise/outline/layered_outline/characters/world_rules/cover_prompt/expand_arc/append_volume/update_compass/complete_book: %w", a.Type, errs.ErrToolArgs)
 	}
 
 	// checkpoint
@@ -364,6 +390,8 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 func foundationArtifact(t string) string {
 	switch t {
 	case "premise":
+		return "premise.md"
+	case "cover_prompt":
 		return "premise.md"
 	case "outline":
 		return "outline.json"

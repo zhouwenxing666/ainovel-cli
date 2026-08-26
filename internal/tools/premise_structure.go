@@ -25,7 +25,8 @@ var premiseHeadingAliases = map[string]string{
 	"终局命题":    "终局命题",
 	"短篇适配性":   "短篇适配性",
 	"本作为什么适合短篇/单卷收束": "短篇适配性",
-	"作品简介": "作品简介",
+	"作品简介":  "作品简介",
+	"封面提示词": "封面提示词",
 }
 
 func parsePremiseSections(premise string) map[string]string {

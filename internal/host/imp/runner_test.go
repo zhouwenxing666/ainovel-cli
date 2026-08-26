@@ -72,6 +72,8 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Fatal("premise 未落盘")
 	} else if synopsis := domain.ExtractSynopsisFromPremise(p); synopsis == "" {
 		t.Fatalf("导入发布的 premise 缺少作品简介：%q", p)
+	} else if !domain.HasCompleteCoverPromptSection(p, "测试书") {
+		t.Fatalf("导入发布的 premise 缺少五份封面提示词：%q", p)
 	}
 	if o, _ := st.Outline.LoadOutline(); len(o) != 2 {
 		t.Fatalf("扁平大纲应覆盖 2 章，得 %d", len(o))

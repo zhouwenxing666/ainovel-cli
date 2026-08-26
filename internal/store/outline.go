@@ -22,6 +22,20 @@ func (s *OutlineStore) SavePremise(content string) error {
 	return s.io.WriteMarkdown("premise.md", content)
 }
 
+// SaveCoverPromptSet 在 premise.md 中幂等追加或替换 `## 封面提示词`，
+// 不覆盖其余前提内容。调用方须先完成结构化校验。
+func (s *OutlineStore) SaveCoverPromptSet(set domain.CoverPromptSet) error {
+	return s.io.WithWriteLock(func() error {
+		data, err := s.io.ReadFileUnlocked("premise.md")
+		if err != nil {
+			return err
+		}
+		section := domain.RenderCoverPromptSection(set)
+		updated := domain.UpsertCoverPromptSection(string(data), section)
+		return s.io.WriteMarkdownUnlocked("premise.md", updated)
+	})
+}
+
 // LoadPremise 读取 premise.md。不存在时返回空字符串。
 func (s *OutlineStore) LoadPremise() (string, error) {
 	data, err := s.io.ReadFile("premise.md")

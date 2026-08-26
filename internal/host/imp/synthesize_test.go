@@ -53,6 +53,7 @@ func TestAssembleFoundationHappyClosed(t *testing.T) {
 	s := &BookSynthesis{
 		Premise:      "# 测试书\n\n前提",
 		Synopsis:     "甲直面困境并完成抉择。",
+		CoverPrompts: coverPromptsForTest("测试书"),
 		Characters:   []domain.Character{{Name: "甲"}},
 		PlanningTier: domain.PlanningTierShort,
 		StoryStatus:  storyClosed,
@@ -80,6 +81,7 @@ func TestAssembleFoundationTitleMismatch(t *testing.T) {
 	// 用结构覆盖不到的章制造真实不一致：章数不符。
 	s := &BookSynthesis{
 		Premise: "# 书", Synopsis: "简介", Characters: []domain.Character{{Name: "甲"}},
+		CoverPrompts: coverPromptsForTest("书"),
 		PlanningTier: domain.PlanningTierShort, StoryStatus: storyOpen,
 		Compass:   domain.StoryCompass{EndingDirection: "x"},
 		Structure: []ImportedVolumeRange{{Arcs: []ImportedArcRange{{StartChapter: 1, EndChapter: 1}}}},
@@ -123,6 +125,25 @@ func TestValidateSynthesisRejectsEmptySynopsis(t *testing.T) {
 	}
 	if err := validateSynthesis(s, 1); err == nil || !strings.Contains(err.Error(), "synopsis") {
 		t.Fatalf("空 synopsis 应被拒绝，得：%v", err)
+	}
+}
+
+func TestValidateSynthesisNormalizesCoverTitleFromImportFilename(t *testing.T) {
+	s := &BookSynthesis{
+		Premise:      "正文无法确认书名。",
+		Synopsis:     "甲直面困境并寻找出路。",
+		CoverPrompts: coverPromptsForTest("临时名"),
+		Characters:   []domain.Character{{Name: "甲"}},
+		PlanningTier: domain.PlanningTierShort,
+		StoryStatus:  storyOpen,
+		Compass:      domain.StoryCompass{EndingDirection: "收束"},
+		Structure:    []ImportedVolumeRange{{Arcs: []ImportedArcRange{{StartChapter: 1, EndChapter: 1}}}},
+	}
+	if err := validateSynthesisWithFallback(s, 1, "导入书.txt"); err != nil {
+		t.Fatalf("validateSynthesisWithFallback: %v", err)
+	}
+	if got, want := s.CoverPrompts.Prompts[0].Title, "导入书（书名据文件名推断）"; got != want {
+		t.Fatalf("official cover title = %q, want %q", got, want)
 	}
 }
 

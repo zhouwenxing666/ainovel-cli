@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
@@ -34,6 +35,25 @@ func TestParsePremiseSections(t *testing.T) {
 	}
 	if sections["中段转折"] == "" {
 		t.Fatalf("expected 中期转向 alias normalized to 中段转折, got %+v", sections)
+	}
+}
+
+func TestParsePremiseSectionsStopsSynopsisAtCoverPrompt(t *testing.T) {
+	premise := `# 测试书
+
+## 作品简介
+只应提取这一句简介。
+
+## 封面提示词
+
+### 方案一｜原书名《测试书》
+生成一张封面。`
+	sections := parsePremiseSections(premise)
+	if got := sections["作品简介"]; got != "只应提取这一句简介。" {
+		t.Fatalf("作品简介被封面内容污染：%q", got)
+	}
+	if !strings.Contains(sections["封面提示词"], "方案一") {
+		t.Fatalf("封面章节未单独解析：%+v", sections)
 	}
 }
 

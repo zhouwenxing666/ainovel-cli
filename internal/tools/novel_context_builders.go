@@ -640,6 +640,13 @@ func (t *ContextTool) buildArchitectPlanning(envelope *architectContextEnvelope,
 		}
 	} else {
 		warn("layered_outline", err)
+		// 短篇/中篇没有 layered_outline，仍须把扁平大纲提供给 Architect，
+		// 供基础设定审查与封面视觉方案提取关键场景。
+		if flat, flatErr := t.store.Outline.LoadOutline(); flatErr == nil && len(flat) > 0 {
+			envelope.Planning["outline"] = flat
+		} else {
+			warn("outline", flatErr)
+		}
 	}
 
 	var compass *domain.StoryCompass

@@ -89,6 +89,15 @@ func publishFoundation(st *store.Store, f *Foundation) error {
 	if _, err := st.Checkpoints.AppendArtifact(domain.GlobalScope(), "compass", "meta/compass.json"); err != nil {
 		return fmt.Errorf("checkpoint compass：%w", err)
 	}
+	// cover_prompt 已在综合阶段根据全书事实生成并组装进 premise；把 checkpoint
+	// 放在其它 Foundation 工件之后，保持与普通 Architect 流程相同的完成顺序。
+	name := domain.ExtractNovelNameFromPremise(f.Premise)
+	if !domain.HasCompleteCoverPromptSection(f.Premise, name) {
+		return fmt.Errorf("cover_prompt：premise 中缺少五份完整封面提示词")
+	}
+	if _, err := st.Checkpoints.AppendArtifact(domain.GlobalScope(), "cover_prompt", "premise.md"); err != nil {
+		return fmt.Errorf("checkpoint cover_prompt：%w", err)
+	}
 	// 导入 Foundation 的全部正式写入均已成功，可以显式进入 writing。
 	// 不能复用普通创作流程的 FoundationMissing：导入允许 world_rules 为空，
 	// 把“合法空值”当成缺失会令进度永远停在 outline，随后 StartChapter 被阶段门禁拒绝。

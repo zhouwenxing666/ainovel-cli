@@ -9,9 +9,9 @@
 
 ## 硬约束
 
-- **保存必须通过工具调用**：premise / characters / world_rules / layered_outline / compass 都必须以 `save_foundation(...)` 调用完成。只把 Markdown/JSON 作为文字输出 = 数据没落盘。
+- **保存必须通过工具调用**：premise / characters / world_rules / layered_outline / compass / cover_prompt 都必须以 `save_foundation(...)` 调用完成。只把 Markdown/JSON 作为文字输出 = 数据没落盘。
 - **按当前事实继续**：先读 `novel_context`，只处理任务要求和 `foundation_status.missing` 指出的缺项；每次保存后以工具返回的 `remaining` 为准，不重复生成已经落盘且无需修改的工件。
-- **初始规划完成前审查**：当 `remaining` 只剩 `foundation_audit`，重新读取全部基础设定，核对人物、势力、规则、长线和终局方向，再把最新 fingerprint 原样传给 `audit_foundation`。
+- **初始规划完成前审查**：当 `remaining` 只剩 `foundation_audit`，重新读取全部基础设定，核对人物、势力、规则、长线、终局方向和五份封面方案与正文设定是否一致，再把最新 fingerprint 原样传给 `audit_foundation`。
 - **发现冲突就修正**：`audit_foundation(ready=false)` 后按 issues 修改对应工件，再次调用 `novel_context` 获取新 fingerprint 并重新审查；不要用解释代替落盘修正。
 - **写作期修订大纲**：先读取当前分层大纲，再用 `revise_outline` 从目标章起提交该弧完整替换尾段；需要保留的弧内后续章节一并提交。骨架弧仍用 `save_foundation(type="expand_arc")` 展开。
 - **按任务完成**：初始规划只有在 `audit_foundation` 返回 `foundation_ready=true` 后才完成；扩弧、续卷和增量修改在要求的工件落盘后结束，不额外重跑初始审查。
@@ -108,6 +108,38 @@ layered_outline / characters / world_rules 的 `content` 直接传 JSON 数组�
 首次落盘认真给，但它可随创作演化经 update_compass 上调或下调——是随笔调整的罗盘，不是签死的合同。
 
 调用 `save_foundation(type="update_compass", content=<JSON>)`。
+
+### Cover Prompts
+
+premise、characters、world_rules、layered_outline、compass 全部落盘后，重新调用一次 `novel_context`，综合正式书名、题材基调、角色外貌、关键场景、世界规则、分层大纲、指南针以及可用的伏笔资料，生成五份封面方案。初始规划尚无伏笔台账时按现有资料继续，不得跳过。
+
+`content` 必须直接传以下结构化对象，固定中文模板由工具渲染进 `premise.md` 的 `## 封面提示词`：
+
+```json
+{
+  "prompts": [
+    {
+      "title": "书名",
+      "genre_tone": "小说类型与基调",
+      "subject": "主角外貌、服装、姿态和动作",
+      "background": "与本书关键情节相关的环境",
+      "primary_colors": "主色调与色彩对比",
+      "text_position": "上方"
+    }
+  ]
+}
+```
+
+硬约束：
+
+- `prompts` 恰好五项。第 1 项 title 必须逐字使用 premise 第一行的正式书名。
+- 第 2-5 项各取一个与本书题材、核心冲突和消费点相关的番茄爆款候选中文书名；每个严格 15 字以内，四个互不重复且不等于正式书名。使用题材相关高转化关键词，不宣称实时热搜。
+- 五项必须是五套不同视觉方向：主体动作、背景、配色、文字位置至少形成不同组合，不能只替换书名。
+- 核心外貌、身份和世界观不得与设定冲突；资料未明确的服装、动作、构图和光效可以合理视觉补全。
+- `genre_tone`、`subject`、`background`、`primary_colors` 只填单段纯内容，不写字段名、不换行、不保留 `[]` 占位符；`text_position` 只能是“上方”“正中央”“下方”。
+- 作者名固定为“寒霄揽月 著”，动漫风、固定文案和竖版 3:4 均由代码渲染，不要塞进字段重复描述。
+
+调用 `save_foundation(type="cover_prompt", content=<上述JSON对象>)`。若工具拒绝候选名长度、重复项或格式，按错误信息整组修正并重试；返回 `count: 5` 后才可进入 foundation_audit。
 
 ## 创建下一卷模式
 

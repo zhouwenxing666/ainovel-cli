@@ -453,6 +453,37 @@ func TestContextToolArchitectModeIncludesPlanningAndFoundation(t *testing.T) {
 	}
 }
 
+func TestContextToolArchitectModeIncludesFlatOutlineForShortBook(t *testing.T) {
+	s := store.NewStore(t.TempDir())
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Progress.Init("短篇", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunMeta.SetPlanningTier(domain.PlanningTierShort); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Outline.SaveOutline([]domain.OutlineEntry{
+		{Chapter: 1, Title: "雨夜", CoreEvent: "主角发现线索"},
+		{Chapter: 2, Title: "破局", CoreEvent: "主角揭开真相"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := newTestContextTool(s, References{}, "default").Execute(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	outline, ok := payload["outline"].([]any)
+	if !ok || len(outline) != 2 {
+		t.Fatalf("short architect context must expose flat outline, got %#v", payload["outline"])
+	}
+}
+
 func TestTrimByBudgetRemovesMirroredMemoryKeys(t *testing.T) {
 	result := map[string]any{
 		"references": map[string]string{

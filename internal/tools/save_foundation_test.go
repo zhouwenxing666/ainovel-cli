@@ -101,6 +101,56 @@ func TestSaveFoundationPremiseSetsNovelName(t *testing.T) {
 	}
 }
 
+func TestSaveFoundationCoverPromptUpsertsFivePlans(t *testing.T) {
+	dir := t.TempDir()
+	st := store.NewStore(dir)
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("长夜燃灯", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SavePremise("# 长夜燃灯\n\n## 作品简介\n简介"); err != nil {
+		t.Fatal(err)
+	}
+	set := coverPromptSetForTest("长夜燃灯")
+	args, _ := json.Marshal(map[string]any{"type": "cover_prompt", "content": set})
+	result, err := NewSaveFoundationTool(st).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute cover_prompt: %v", err)
+	}
+	var payload struct {
+		Count      int      `json:"count"`
+		Candidates []string `json:"candidate_titles"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Count != 5 || len(payload.Candidates) != 4 {
+		t.Fatalf("unexpected result: %+v", payload)
+	}
+	premise, err := st.Outline.LoadPremise()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(premise, "## 封面提示词") != 1 || strings.Count(premise, "生成一张极具视觉冲击力的番茄网络小说封面") != 5 {
+		t.Fatalf("premise should contain exactly five plans:\n%s", premise)
+	}
+	if cp := st.Checkpoints.LatestByStep(domain.GlobalScope(), "cover_prompt"); cp == nil || cp.Artifact != "premise.md" {
+		t.Fatalf("cover_prompt checkpoint missing: %+v", cp)
+	}
+
+	set.Prompts[0].PrimaryColors = "青白与深黑对比色调"
+	args, _ = json.Marshal(map[string]any{"type": "cover_prompt", "content": set})
+	if _, err := NewSaveFoundationTool(st).Execute(context.Background(), args); err != nil {
+		t.Fatalf("replace cover_prompt: %v", err)
+	}
+	premise, _ = st.Outline.LoadPremise()
+	if strings.Count(premise, "## 封面提示词") != 1 || !strings.Contains(premise, "青白与深黑对比色调") {
+		t.Fatalf("cover_prompt replacement must be idempotent:\n%s", premise)
+	}
+}
+
 func TestSaveFoundationOutlineClearsLayeredStateWhenDowngrading(t *testing.T) {
 	dir := t.TempDir()
 	store := store.NewStore(dir)

@@ -32,7 +32,20 @@ func completeShortFoundation(t *testing.T) *store.Store {
 	if err := s.World.SaveWorldRules([]domain.WorldRule{{Category: "society", Rule: "城门夜禁", Boundary: "入夜关闭"}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.Outline.SaveCoverPromptSet(coverPromptSetForTest("审查测试")); err != nil {
+		t.Fatal(err)
+	}
 	return s
+}
+
+func coverPromptSetForTest(title string) domain.CoverPromptSet {
+	return domain.CoverPromptSet{Prompts: []domain.CoverPrompt{
+		{Title: title, GenreTone: "都市悬疑", Subject: "青年侦探站在雨中", Background: "霓虹闪烁的旧城街巷", PrimaryColors: "冷蓝与猩红对比色调", TextPosition: "上方"},
+		{Title: "开局追凶震惊全城", GenreTone: "都市追凶", Subject: "青年侦探举起染血证物", Background: "警灯交错的封锁现场", PrimaryColors: "深黑与警灯蓝红色调", TextPosition: "正中央"},
+		{Title: "我能看见罪恶真相", GenreTone: "异能悬疑", Subject: "青年眼中浮现发光线索", Background: "证据碎片悬浮的审讯室", PrimaryColors: "暗金与墨黑色调", TextPosition: "下方"},
+		{Title: "全城通缉我破局", GenreTone: "高压逃亡", Subject: "青年回身冲破包围", Background: "直升机盘旋的城市天台", PrimaryColors: "炽白与血红色调", TextPosition: "上方"},
+		{Title: "深夜档案局", GenreTone: "诡秘探案", Subject: "青年推开布满符咒的铁门", Background: "无尽档案柜延伸进黑雾", PrimaryColors: "幽绿与深紫色调", TextPosition: "正中央"},
+	}}
 }
 
 func TestAuditFoundationControlsWritingTransition(t *testing.T) {
@@ -113,8 +126,19 @@ func TestSaveFoundationWaitsForSemanticAudit(t *testing.T) {
 	if err := json.Unmarshal(result, &payload); err != nil {
 		t.Fatal(err)
 	}
+	if payload.Ready || len(payload.Remaining) != 1 || payload.Remaining[0] != "cover_prompt" {
+		t.Fatalf("outline complete should still wait for cover_prompt: %+v", payload)
+	}
+	coverArgs, _ := json.Marshal(map[string]any{"type": "cover_prompt", "content": coverPromptSetForTest("test")})
+	result, err = NewSaveFoundationTool(s).Execute(context.Background(), coverArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatal(err)
+	}
 	if payload.Ready || len(payload.Remaining) != 1 || payload.Remaining[0] != "foundation_audit" {
-		t.Fatalf("save_foundation must wait for audit: %+v", payload)
+		t.Fatalf("cover_prompt complete must wait for audit: %+v", payload)
 	}
 	if p, _ := s.Progress.Load(); p.Phase == domain.PhaseWriting {
 		t.Fatal("save_foundation must not enter writing before audit")
@@ -127,7 +151,11 @@ func TestAuditFoundationRejectsStaleFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Outline.SavePremise("# 已修改的版本"); err != nil {
+	premise, err := s.Outline.LoadPremise()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Outline.SavePremise(strings.Replace(premise, "## 主角目标", "## 核心冲突", 1)); err != nil {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(map[string]any{

@@ -113,6 +113,16 @@ var synthesisContract = llmcontract.Contract{
 	Schema: schema.Object(
 		schema.Property("premise", schema.String("故事前提的 Markdown 描述")).Required(),
 		schema.Property("synopsis", schema.String("面向读者的 100-200 字作品简介；概括核心冲突与看点，不剧透关键转折")).Required(),
+		schema.Property("cover_prompts", schema.Object(
+			schema.Property("prompts", schema.Array("恰好五份不同视觉方向的封面方案：第一份使用正式书名，后四份使用题材相关的番茄爆款候选中文书名", schema.Object(
+				schema.Property("title", schema.String("本方案书名；第一份为正式书名，后四份互异、与正式书名不同且严格15字以内")).Required(),
+				schema.Property("genre_tone", schema.String("小说类型与基调，不要以‘风格’结尾")).Required(),
+				schema.Property("subject", schema.String("主角外貌、服装、姿态和动作的单段画面描述")).Required(),
+				schema.Property("background", schema.String("与本书关键场景相关的背景环境单段描述")).Required(),
+				schema.Property("primary_colors", schema.String("主色调与色彩对比的单段描述")).Required(),
+				schema.Property("text_position", schema.Enum("书名位置", "上方", "正中央", "下方")).Required(),
+			))).Required(),
+		)).Required(),
 		schema.Property("characters", schema.Array("主要人物", schema.Object(
 			schema.Property("name", schema.String("人物名")).Required(),
 			schema.Property("aliases", stringList("别名与称号")).Required(),

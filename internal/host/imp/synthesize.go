@@ -19,8 +19,8 @@ const (
 // synthesisSchemaVersion 纳入 RangeDigest / synthesis InputDigest，升级综合契约时递增以失效已落盘工件。
 // synthesizePromptVersion 纳入 synthesis InputDigest，改综合 prompt 时递增，否则旧 synthesis 仍被误判有效。
 const (
-	synthesisSchemaVersion  = 3
-	synthesizePromptVersion = "synthesize-v3"
+	synthesisSchemaVersion  = 4
+	synthesizePromptVersion = "synthesize-v4"
 	rangePromptVersion      = "range-v2" // 纳入 rangeInputDigest，改 Range prompt 时递增，否则旧区间摘要仍被误判有效
 )
 
@@ -42,6 +42,7 @@ type ImportedVolumeRange struct {
 type BookSynthesis struct {
 	Premise      string                `json:"premise"`
 	Synopsis     string                `json:"synopsis"`
+	CoverPrompts domain.CoverPromptSet `json:"cover_prompts"`
 	Characters   []domain.Character    `json:"characters"`
 	WorldRules   []domain.WorldRule    `json:"world_rules"`
 	Structure    []ImportedVolumeRange `json:"structure"`
@@ -133,9 +134,15 @@ func compactFacts(facts []ImportedChapterFacts) string {
 // bookPrompt 描述 BookSynthesis 契约，rangePrompt 描述 RangeDigest 契约——两阶段输出结构不同，
 // 必须各用对应系统提示词，否则模型收到 BookSynthesis 指令却被要求 RangeDigest，指令自相矛盾。
 func Synthesize(ctx context.Context, m callModel, bookPrompt, rangePrompt string, w *Workspace, facts []ImportedChapterFacts, budgetBytes, maxTokens int, prof callProfile) (*BookSynthesis, error) {
+	fallbackName := ""
+	if w != nil {
+		if manifest, err := w.LoadManifest(); err == nil && manifest != nil {
+			fallbackName = manifest.SourceName
+		}
+	}
 	ranges := planFactRanges(facts, budgetBytes)
 	if len(ranges) <= 1 {
-		return synthesizeBook(ctx, m, bookPrompt, compactFacts(facts), len(facts), maxTokens, prof)
+		return synthesizeBook(ctx, m, bookPrompt, compactFacts(facts), fallbackName, len(facts), maxTokens, prof)
 	}
 	digests := make([]RangeDigest, 0, len(ranges))
 	for ri, r := range ranges {
@@ -167,7 +174,7 @@ func Synthesize(ctx context.Context, m callModel, bookPrompt, rangePrompt string
 		return nil, err
 	}
 	data, _ := json.Marshal(digests)
-	return synthesizeBook(ctx, m, bookPrompt, string(data), len(facts), maxTokens, prof)
+	return synthesizeBook(ctx, m, bookPrompt, string(data), fallbackName, len(facts), maxTokens, prof)
 }
 
 // reduceToFit 反复把连续区间摘要按预算分组归并，直到序列化后可容纳最终 BookSynthesis 输入预算。
@@ -253,10 +260,10 @@ func rangeInputDigest(facts []ImportedChapterFacts) string {
 	return Digest([]byte(fmt.Sprintf("range\x00%s\x00v%d\x00%s", rangePromptVersion, synthesisSchemaVersion, compactFacts(facts))))
 }
 
-func synthesizeBook(ctx context.Context, m callModel, systemPrompt, payload string, n, maxTokens int, prof callProfile) (*BookSynthesis, error) {
+func synthesizeBook(ctx context.Context, m callModel, systemPrompt, payload, fallbackName string, n, maxTokens int, prof callProfile) (*BookSynthesis, error) {
 	prof.step(0, 0, "生成全书综合（premise/characters/大纲结构）...")
-	s, err := callStructured[BookSynthesis](ctx, m, synthesisContract, systemPrompt, buildBookPayload(payload, n), maxTokens, prof, func(s *BookSynthesis) error {
-		return validateSynthesis(s, n)
+	s, err := callStructured[BookSynthesis](ctx, m, synthesisContract, systemPrompt, buildBookPayload(payload, fallbackName, n), maxTokens, prof, func(s *BookSynthesis) error {
+		return validateSynthesisWithFallback(s, n, fallbackName)
 	})
 	if err != nil {
 		return nil, err
@@ -271,18 +278,37 @@ func buildRangePayload(facts []ImportedChapterFacts) string {
 		facts[0].Chapter, facts[len(facts)-1].Chapter, compactFacts(facts))
 }
 
-func buildBookPayload(inner string, n int) string {
-	return fmt.Sprintf("以下是全书 %d 章的紧凑事实/区间摘要。请生成 BookSynthesis：premise、synopsis、characters、world_rules、卷弧范围 structure、compass、planning_tier、story_status。\n\n%s", n, inner)
+func buildBookPayload(inner, fallbackName string, n int) string {
+	nameHint := ""
+	if strings.TrimSpace(fallbackName) != "" {
+		nameHint = fmt.Sprintf("\n源文件名为 %q；正文无法确认书名时，代码会据此推断正式书名，四个候选封面书名不要与该名称重复。", fallbackName)
+	}
+	return fmt.Sprintf("以下是全书 %d 章的紧凑事实/区间摘要。请生成 BookSynthesis：premise、synopsis、cover_prompts（五份封面方案）、characters、world_rules、卷弧范围 structure、compass、planning_tier、story_status。%s\n\n%s", n, nameHint, inner)
 }
 
 // validateSynthesis 校验综合结果的结构约束（值域/闭集/范围），不复判文学质量。
 func validateSynthesis(s *BookSynthesis, n int) error {
+	return validateSynthesisWithFallback(s, n, "")
+}
+
+func validateSynthesisWithFallback(s *BookSynthesis, n int, fallbackName string) error {
 	if strings.TrimSpace(s.Premise) == "" {
 		return fmt.Errorf("premise 为空")
 	}
 	if strings.TrimSpace(s.Synopsis) == "" {
 		return fmt.Errorf("synopsis 为空")
 	}
+	coverPrompts := domain.CoverPromptSet{Prompts: append([]domain.CoverPrompt(nil), s.CoverPrompts.Prompts...)}
+	officialTitle := domain.ExtractNovelNameFromPremise(ensurePremiseTitle(s.Premise, fallbackName))
+	if len(coverPrompts.Prompts) > 0 {
+		if officialTitle != "" {
+			coverPrompts.Prompts[0].Title = officialTitle
+		}
+	}
+	if err := domain.ValidateCoverPromptSet(coverPrompts, officialTitle); err != nil {
+		return fmt.Errorf("cover_prompts 非法：%w", err)
+	}
+	s.CoverPrompts = coverPrompts
 	if len(s.Characters) == 0 {
 		return fmt.Errorf("characters 为空")
 	}
@@ -355,7 +381,7 @@ type Foundation struct {
 // closed 是 story_status 裁定后的收束事实；fallbackName 用于正文无法确认书名时的推断标题。
 func AssembleFoundation(s *BookSynthesis, facts []ImportedChapterFacts, closed bool, fallbackName string) (*Foundation, error) {
 	n := len(facts)
-	if err := validateSynthesis(s, n); err != nil {
+	if err := validateSynthesisWithFallback(s, n, fallbackName); err != nil {
 		return nil, err
 	}
 	byChapter := make(map[int]ImportedChapterFacts, n)
@@ -397,6 +423,16 @@ func AssembleFoundation(s *BookSynthesis, facts []ImportedChapterFacts, closed b
 	}
 
 	premise := ensurePremiseSynopsis(ensurePremiseTitle(s.Premise, fallbackName), s.Synopsis)
+	name := domain.ExtractNovelNameFromPremise(premise)
+	if name == "" {
+		return nil, fmt.Errorf("无法从组装后的 premise 提取正式书名")
+	}
+	coverPrompts := domain.CoverPromptSet{Prompts: append([]domain.CoverPrompt(nil), s.CoverPrompts.Prompts...)}
+	coverPrompts.Prompts[0].Title = name
+	if err := domain.ValidateCoverPromptSet(coverPrompts, name); err != nil {
+		return nil, fmt.Errorf("组装 cover_prompts：%w", err)
+	}
+	premise = domain.UpsertCoverPromptSection(premise, domain.RenderCoverPromptSection(coverPrompts))
 	return &Foundation{
 		PlanningTier: s.PlanningTier,
 		Premise:      premise,

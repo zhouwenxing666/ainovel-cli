@@ -158,15 +158,25 @@ func (s *Store) FoundationMissing() ([]string, error) {
 			missing = append(missing, "compass")
 		}
 	}
+	progress, err := s.Progress.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load progress: %w", err)
+	}
+	planning := progress == nil || (progress.Phase != domain.PhaseWriting && progress.Phase != domain.PhaseComplete)
+	// 封面提示词是新规划的必备工件，但不追溯阻塞已进入 writing/complete 的旧书。
+	// 它必须位于其它基础设定之后、foundation_audit 之前；Markdown 的完整性检查
+	// 可识别缺段、截断或错误书名，结构化字段的更严格校验在写工具执行。
+	if planning && premise != "" {
+		name := domain.ExtractNovelNameFromPremise(premise)
+		if name == "" || !domain.HasCompleteCoverPromptSection(premise, name) {
+			missing = append(missing, "cover_prompt")
+		}
+	}
 	// 新书只有经过模型对已落盘工件的显式语义审查，才允许从规划进入写作。
 	// PhaseWriting/Complete 代表旧书或已审查的新书，保持历史项目兼容；审查本身
 	// 是一个动作而非文件缺失，因此只在其它工件齐全时追加。
 	if len(missing) == 0 {
-		progress, err := s.Progress.Load()
-		if err != nil {
-			return nil, fmt.Errorf("load progress: %w", err)
-		}
-		if progress == nil || (progress.Phase != domain.PhaseWriting && progress.Phase != domain.PhaseComplete) {
+		if planning {
 			missing = append(missing, "foundation_audit")
 		}
 	}

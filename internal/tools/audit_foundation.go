@@ -25,7 +25,7 @@ func NewAuditFoundationTool(store *store.Store) *AuditFoundationTool {
 
 func (t *AuditFoundationTool) Name() string { return "audit_foundation" }
 func (t *AuditFoundationTool) Description() string {
-	return "审查已落盘的 premise、outline、characters、world_rules 与 compass 是否语义一致。" +
+	return "审查已落盘的 premise（含五份封面提示词）、outline、characters、world_rules 与 compass 是否语义一致。" +
 		"必须先重新调用 novel_context，并原样传入 foundation_status.fingerprint。"
 }
 func (t *AuditFoundationTool) Label() string                          { return "审查设定" }
@@ -35,7 +35,7 @@ func (t *AuditFoundationTool) StrictSchema() bool                     { return t
 
 func (t *AuditFoundationTool) Schema() map[string]any {
 	issue := schema.Object(
-		schema.Property("artifact", schema.String("存在问题的工件，如 premise/characters/layered_outline/world_rules/compass")).Required(),
+		schema.Property("artifact", schema.String("存在问题的工件，如 premise/cover_prompt/characters/layered_outline/world_rules/compass")).Required(),
 		schema.Property("description", schema.String("跨文件语义问题")).Required(),
 		schema.Property("evidence", schema.String("来自已落盘内容的具体冲突证据")).Required(),
 		schema.Property("suggestion", llmcontract.Nullable(schema.String("推荐修改方向；无需建议时为 null"))).Required(),
