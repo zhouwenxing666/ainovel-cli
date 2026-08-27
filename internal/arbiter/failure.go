@@ -3,6 +3,7 @@ package arbiter
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/voocel/agentcore"
@@ -47,6 +48,15 @@ func (d *FailureDecision) ValidateAgainst(f FailureFacts) error {
 		}
 		if err := d.Dispatch.validate(); err != nil {
 			return err
+		}
+		if slices.Contains(f.FoundationGap, "cover_prompt") {
+			if d.Dispatch.Agent != "architect_long" && d.Dispatch.Agent != "architect_short" {
+				return fmt.Errorf("旧书封面迁移完成前只能改派 architect，禁止派发 %s", d.Dispatch.Agent)
+			}
+			task := strings.ToLower(d.Dispatch.Task)
+			if !strings.Contains(task, "cover_prompt") && !strings.Contains(task, "封面提示词") {
+				return fmt.Errorf("旧书封面迁移改派任务必须明确补齐 cover_prompt")
+			}
 		}
 		return validateDispatchAgainst(d.Dispatch, f.Phase)
 	default:

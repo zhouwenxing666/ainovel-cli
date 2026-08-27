@@ -3,6 +3,7 @@ package flow
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -42,9 +43,104 @@ func TestRoute_NilProgress(t *testing.T) {
 
 func TestRoute_PhaseComplete(t *testing.T) {
 	// 完本期返回 nil：作品简介在初始化阶段写入 premise.md，完本后无需再派发任何 agent。
-	s := State{Progress: &domain.Progress{Phase: domain.PhaseComplete}}
+	s := State{Progress: &domain.Progress{Phase: domain.PhaseComplete}, FoundationMissing: []string{"cover_prompt"}}
 	if got := Route(s); got != nil {
 		t.Fatalf("expected nil at PhaseComplete, got %+v", got)
+	}
+}
+
+func TestRoute_WritingCoverMigrationPreemptsAllWritingWork(t *testing.T) {
+	p := writingProgress([]int{1, 2}, domain.FlowRewriting)
+	p.PendingReviewChapter = 2
+	p.PendingRewrites = []int{1}
+	got := Route(State{
+		Progress:          p,
+		FoundationMissing: []string{"cover_prompt"},
+		PlanningTier:      domain.PlanningTierShort,
+	})
+	if got == nil || got.Agent != "architect_short" || got.Chapter != 0 {
+		t.Fatalf("cover migration must dispatch short architect before reviewer/rewrites, got %+v", got)
+	}
+	for _, want := range []string{"旧书封面提示词迁移", "save_foundation(type=cover_prompt)", "不得修改", "不在本轮续写正文"} {
+		if !strings.Contains(got.Task, want) {
+			t.Errorf("migration task missing %q: %s", want, got.Task)
+		}
+	}
+	if !strings.Contains(got.Reason, "暂停续写") {
+		t.Fatalf("migration reason must state writing is blocked: %s", got.Reason)
+	}
+}
+
+func TestRoute_WritingCoverMigrationFallsBackToLongArchitect(t *testing.T) {
+	p := writingProgress(nil, domain.FlowWriting)
+	got := Route(State{Progress: p, FoundationMissing: []string{"cover_prompt"}})
+	if got == nil || got.Agent != "architect_long" {
+		t.Fatalf("unknown legacy tier should use long architect, got %+v", got)
+	}
+}
+
+func TestLoadStateRoutesLegacyWritingBookThroughCoverMigrationThenResumes(t *testing.T) {
+	st := storepkg.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("旧书迁移", 2); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []domain.Phase{domain.PhasePremise, domain.PhaseOutline, domain.PhaseWriting} {
+		if err := st.Progress.UpdatePhase(phase); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.RunMeta.SetPlanningTier(domain.PlanningTierShort); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SavePremise("# 旧书迁移\n\n## 作品简介\n一名少年在废土追寻失落真相。"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SaveOutline([]domain.OutlineEntry{{Chapter: 1, Title: "废土启程", CoreEvent: "少年走入禁区"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Characters.Save([]domain.Character{{Name: "林夜", Role: "主角"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.World.SaveWorldRules([]domain.WorldRule{{Category: "禁区", Rule: "夜间异变", Boundary: "黎明消退"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := LoadState(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(before.FoundationMissing, "cover_prompt") {
+		t.Fatalf("旧 writing 项目应识别出封面迁移缺项: %v", before.FoundationMissing)
+	}
+	migration := Route(before)
+	if migration == nil || migration.Agent != "architect_short" || !strings.Contains(migration.Task, "cover_prompt") {
+		t.Fatalf("应先派短篇规划师执行封面迁移, got %+v", migration)
+	}
+
+	set := domain.CoverPromptSet{Prompts: []domain.CoverPrompt{
+		{Title: "旧书迁移", GenreTone: "废土悬疑", Subject: "少年背对镜头握住发光罗盘", Background: "被黑雾吞没的废土城市", PrimaryColors: "冷蓝与猩红对比色调", TextPosition: "上方"},
+		{Title: "废土禁区我能看见真相", GenreTone: "末日异能", Subject: "少年抬手撕开黑雾裂缝", Background: "怪物盘踞的坍塌高楼", PrimaryColors: "暗黑与幽蓝色调", TextPosition: "正中央"},
+		{Title: "末日开局一枚逆命罗盘", GenreTone: "末日逆袭", Subject: "少年托起燃烧的古老罗盘", Background: "红月笼罩的避难所", PrimaryColors: "红黑与灼金色调", TextPosition: "下方"},
+		{Title: "禁区降临我杀穿黑夜", GenreTone: "暗黑杀伐", Subject: "少年持刀迎向成群异兽", Background: "碎石飞舞的禁区战场", PrimaryColors: "紫黑与血红色调", TextPosition: "上方"},
+		{Title: "全民逃亡我独闯禁区", GenreTone: "全民末日", Subject: "少年站在巨兽头骨之上", Background: "雷暴撕裂的荒原禁区", PrimaryColors: "暗金与深灰色调", TextPosition: "正中央"},
+	}}
+	if err := st.Outline.SaveCoverPromptSet(set); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := LoadState(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(after.FoundationMissing, "cover_prompt") {
+		t.Fatalf("迁移落盘后 cover_prompt 缺项应消失: %v", after.FoundationMissing)
+	}
+	resumed := Route(after)
+	if resumed == nil || resumed.Agent != "writer" || resumed.Chapter != 1 {
+		t.Fatalf("迁移完成后应恢复原正文路由, got %+v", resumed)
 	}
 }
 

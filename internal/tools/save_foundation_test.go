@@ -151,6 +151,39 @@ func TestSaveFoundationCoverPromptUpsertsFivePlans(t *testing.T) {
 	}
 }
 
+func TestSaveFoundationCoverPromptUsesLegacyWritingProgressTitle(t *testing.T) {
+	st := store.NewStore(t.TempDir())
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Progress.Init("存量书名", 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []domain.Phase{domain.PhasePremise, domain.PhaseOutline, domain.PhaseWriting} {
+		if err := st.Progress.UpdatePhase(phase); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 兼容早期 premise 没有 H1 书名、但 progress 已保存正式书名的项目。
+	if err := st.Outline.SavePremise("## 作品简介\n旧书简介"); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"type":    "cover_prompt",
+		"content": coverPromptSetForTest("存量书名"),
+	})
+	if _, err := NewSaveFoundationTool(st).Execute(context.Background(), args); err != nil {
+		t.Fatalf("legacy writing cover migration should use progress title: %v", err)
+	}
+	premise, err := st.Outline.LoadPremise()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(premise, "### 方案一｜原书名《存量书名》") {
+		t.Fatalf("progress title was not rendered into cover prompt:\n%s", premise)
+	}
+}
+
 func TestSaveFoundationOutlineClearsLayeredStateWhenDowngrading(t *testing.T) {
 	dir := t.TempDir()
 	store := store.NewStore(dir)

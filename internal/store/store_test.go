@@ -72,7 +72,7 @@ func TestFoundationMissingRequiresCoverBeforeAuditForNewBook(t *testing.T) {
 	}
 }
 
-func TestFoundationMissingDoesNotBackfillLegacyWritingBook(t *testing.T) {
+func TestFoundationMissingMigratesLegacyWritingBookWithoutOverwritingExistingSection(t *testing.T) {
 	st := NewStore(t.TempDir())
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
@@ -101,8 +101,35 @@ func TestFoundationMissingDoesNotBackfillLegacyWritingBook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !reflect.DeepEqual(missing, []string{"cover_prompt"}) {
+		t.Fatalf("legacy writing book should request cover migration, got %v", missing)
+	}
+
+	// 只要旧书已有二级标题（即使是人工自由格式），迁移就不得覆盖。
+	if err := st.Outline.SavePremise("# 旧书\n\n## 封面提示词\n人工润色的旧封面方案"); err != nil {
+		t.Fatal(err)
+	}
+	missing, err = st.FoundationMissing()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(missing) != 0 {
-		t.Fatalf("legacy writing book must not be backfilled, got %v", missing)
+		t.Fatalf("existing manual cover section must be preserved, got %v", missing)
+	}
+
+	// complete 是终态，即使删除封面章节也不自动迁移。
+	if err := st.Progress.UpdatePhase(domain.PhaseComplete); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Outline.SavePremise("# 旧书"); err != nil {
+		t.Fatal(err)
+	}
+	missing, err = st.FoundationMissing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("complete book must not be migrated, got %v", missing)
 	}
 }
 

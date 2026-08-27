@@ -18,6 +18,7 @@
 Worker 期间可能落了 plan/draft/edit 等中间产物，但它们不等于本路由任务完成。
 
 - 从 facts 判断卡点：如缺项在 `foundation_missing` → reroute 给规划师补齐；重写队列头有问题 → reroute 给 editor 复核
+- `foundation_missing` 含 `cover_prompt` 表示旧书自动迁移尚未完成：只能 `retry` 原迁移，或 `reroute` 给 architect_long / architect_short 且任务明确补齐 `cover_prompt`；不得改派 writer / reviewer / editor 绕过迁移。若反复失败或无法完成则 `abort` 暂停
 - 任务文本本身可能有歧义 → `reroute` 同一 agent 但改写更明确的 task
 - 无法判断 → `abort`（宁可停下等人，不做无谓消耗）
 

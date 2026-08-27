@@ -214,7 +214,16 @@ func (t *SaveFoundationTool) Execute(_ context.Context, args json.RawMessage) (j
 		}
 		name := domain.ExtractNovelNameFromPremise(premise)
 		if name == "" {
-			return nil, fmt.Errorf("生成封面提示词前 premise 第一行必须包含真实书名（# 实际书名）: %w", errs.ErrToolPrecondition)
+			progress, progressErr := t.store.Progress.Load()
+			if progressErr != nil {
+				return nil, fmt.Errorf("load progress for cover prompt title: %w: %w", errs.ErrStoreRead, progressErr)
+			}
+			if progress != nil && (progress.Phase == domain.PhaseWriting || progress.Phase == domain.PhaseComplete) {
+				name = strings.TrimSpace(progress.NovelName)
+			}
+		}
+		if name == "" {
+			return nil, fmt.Errorf("生成封面提示词前必须能从 premise 第一行或既有 progress 取得真实书名: %w", errs.ErrToolPrecondition)
 		}
 		var prompts domain.CoverPromptSet
 		if err := decode("cover_prompt", &prompts); err != nil {

@@ -284,12 +284,38 @@ func testReviewerConfig(st *storepkg.Store) subagent.Config {
 	}
 }
 
+// ensureEngineTestCoverMigrated 让与封面迁移无关的 writing 测试明确表示“已迁移旧书”。
+// 封面迁移本身由 flow/store/tools 的专项测试覆盖，避免它抢占这些测试要验证的
+// Writer/Reviewer/Editor 路由。
+func ensureEngineTestCoverMigrated(t *testing.T, st *storepkg.Store) {
+	t.Helper()
+	progress, err := st.Progress.Load()
+	if err != nil {
+		t.Fatalf("load progress for cover fixture: %v", err)
+	}
+	if progress == nil || progress.Phase != domain.PhaseWriting {
+		return
+	}
+	premise, err := st.Outline.LoadPremise()
+	if err != nil {
+		t.Fatalf("load premise for cover fixture: %v", err)
+	}
+	if domain.HasCoverPromptSection(premise) {
+		return
+	}
+	premise = domain.UpsertCoverPromptSection(premise, "## 封面提示词\n\nEngine 测试夹具：已完成旧书封面迁移。")
+	if err := st.Outline.SavePremise(premise); err != nil {
+		t.Fatalf("save cover fixture: %v", err)
+	}
+}
+
 // newTestEngine 组装带真实 store/observer 的引擎;返回引擎、事件采集与完成信号。
 func newTestEngine(t *testing.T, st *storepkg.Store, workers *subagent.Runner, arbiterModel agentcore.ChatModel) (*engine, *[]Event, chan struct{}) {
 	t.Helper()
 	if err := st.RunMeta.Init("default", "test", "test"); err != nil {
 		t.Fatalf("init run meta: %v", err)
 	}
+	ensureEngineTestCoverMigrated(t, st)
 	var mu sync.Mutex
 	events := &[]Event{}
 	done := make(chan struct{}, 1)

@@ -216,6 +216,17 @@ func isCoverPromptH2(line string) bool {
 	return markdownHeadingLevel(line) == 2 && markdownHeadingTitle(line) == CoverPromptHeading
 }
 
+// HasCoverPromptSection 只判断二级标题是否存在。旧 writing 项目的自动迁移用它
+// 避免覆盖用户已经手工添加或润色过的封面章节；新书门禁仍使用更严格的完整性检查。
+func HasCoverPromptSection(premise string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(premise, "\r\n", "\n"), "\n") {
+		if isCoverPromptH2(line) {
+			return true
+		}
+	}
+	return false
+}
+
 func markdownHeadingLevel(line string) int {
 	trimmed := strings.TrimSpace(line)
 	level := 0

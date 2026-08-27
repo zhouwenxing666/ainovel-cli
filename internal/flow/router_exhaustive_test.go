@@ -9,6 +9,7 @@ package flow
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
@@ -29,6 +30,7 @@ const (
 	expectNewVolume
 	expectNextChapter
 	expectFoundationFill
+	expectCoverMigration
 	expectGlobalReview
 )
 
@@ -37,11 +39,12 @@ const (
 //  1. Progress 缺失 / Phase 终态 → LLM 裁定（nil）
 //  2. 规划期（非写作期）：设定缺项且规划师可判定（save_foundation 已落过 scale）
 //     → 照缺项续派同一规划师；否则 → LLM 裁定（nil，含首次规划师选型）
-//  3. 待 Reviewer 章节 → reviewer（优先于下一次 Writer 与 Editor）
-//  4. 重写/打磨队列非空 → writer 按队列头（压过弧末事务）
-//  5. Flow=Reviewing / Steering → LLM 裁定（nil）
-//  6. 分层模式弧末 → 评审 → 弧摘要 → (卷末)卷摘要 → 展开下一弧 → 追加新卷
-//  7. 其余 → writer 续写下一章
+//  3. Writing 旧书缺 cover_prompt → 规划师迁移（压过所有写作事务）
+//  4. 待 Reviewer 章节 → reviewer（优先于下一次 Writer 与 Editor）
+//  5. 重写/打磨队列非空 → writer 按队列头（压过弧末事务）
+//  6. Flow=Reviewing / Steering → LLM 裁定（nil）
+//  7. 分层模式弧末 → 评审 → 弧摘要 → (卷末)卷摘要 → 展开下一弧 → 追加新卷
+//  8. 其余 → writer 续写下一章
 func expectedInstruction(s State) expectKind {
 	p := s.Progress
 	if p == nil || p.Phase == domain.PhaseComplete {
@@ -52,6 +55,9 @@ func expectedInstruction(s State) expectKind {
 			return expectFoundationFill
 		}
 		return expectNil
+	}
+	if slices.Contains(s.FoundationMissing, "cover_prompt") {
+		return expectCoverMigration
 	}
 	if p.PendingReviewChapter > 0 {
 		return expectReviewer
@@ -115,6 +121,8 @@ func classify(t *testing.T, inst *Instruction) expectKind {
 		}
 	case "architect_long":
 		switch {
+		case contains(inst.Task, "旧书封面提示词迁移"):
+			return expectCoverMigration
 		case contains(inst.Task, "补齐基础设定"):
 			return expectFoundationFill
 		case contains(inst.Task, "expand_arc"):
@@ -123,6 +131,9 @@ func classify(t *testing.T, inst *Instruction) expectKind {
 			return expectNewVolume
 		}
 	case "architect_short":
+		if contains(inst.Task, "旧书封面提示词迁移") {
+			return expectCoverMigration
+		}
 		if contains(inst.Task, "补齐基础设定") {
 			return expectFoundationFill
 		}
@@ -208,7 +219,7 @@ func TestRoute_ExhaustiveAgainstSpec(t *testing.T) {
 	pendingReviews := []int{0, 5}
 	// {1..5} 命中 ReviewInterval(=5)的全局审阅触发点
 	completedSets := [][]int{nil, {1, 2, 3}, {1, 2, 3, 4, 5}}
-	missingSets := [][]string{nil, {"characters", "world_rules"}}
+	missingSets := [][]string{nil, {"characters", "world_rules"}, {"cover_prompt"}, {"characters", "cover_prompt"}}
 	tiers := []domain.PlanningTier{"", domain.PlanningTierShort, domain.PlanningTierLong}
 	globalReviews := []bool{false, true}
 
@@ -322,7 +333,7 @@ func assertConservation(t *testing.T, s State, inst *Instruction) {
 		} else if inst.Chapter != p.NextChapter() {
 			t.Fatalf("续写指令章节号应为 NextChapter=%d，got %d", p.NextChapter(), inst.Chapter)
 		}
-	case "editor", "architect_long":
+	case "editor", "architect_long", "architect_short":
 		if inst.Chapter != 0 {
 			t.Fatalf("%s 指令不应带章节号：%+v", inst.Agent, inst)
 		}

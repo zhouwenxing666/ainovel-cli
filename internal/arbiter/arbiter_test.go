@@ -256,6 +256,42 @@ func TestFailureDecision_Validate(t *testing.T) {
 	}
 }
 
+func TestFailureDecision_CoverMigrationCannotBeBypassed(t *testing.T) {
+	facts := FailureFacts{
+		Kind:          "worker_failure",
+		Phase:         string(domain.PhaseWriting),
+		FoundationGap: []string{"cover_prompt"},
+	}
+	for _, agent := range []string{"writer", "reviewer", "editor"} {
+		d := FailureDecision{
+			Action:   "reroute",
+			Dispatch: &DispatchOp{Agent: agent, Task: "先继续原写作事务"},
+			Reason:   "尝试绕过迁移",
+		}
+		if err := d.ValidateAgainst(facts); err == nil {
+			t.Fatalf("封面迁移完成前不得改派 %s", agent)
+		}
+	}
+
+	unrelatedArchitect := FailureDecision{
+		Action:   "reroute",
+		Dispatch: &DispatchOp{Agent: "architect_long", Task: "修改后续大纲"},
+		Reason:   "尝试执行无关规划任务",
+	}
+	if err := unrelatedArchitect.ValidateAgainst(facts); err == nil {
+		t.Fatal("封面迁移期间 architect 改派也必须明确补齐 cover_prompt")
+	}
+
+	coverArchitect := FailureDecision{
+		Action:   "reroute",
+		Dispatch: &DispatchOp{Agent: "architect_short", Task: "重新生成五份封面提示词并保存 cover_prompt"},
+		Reason:   "换用短篇规划师重试迁移",
+	}
+	if err := coverArchitect.ValidateAgainst(facts); err != nil {
+		t.Fatalf("明确的 architect 封面迁移改派应合法: %v", err)
+	}
+}
+
 func TestCollectInterventionFacts(t *testing.T) {
 	st := storepkg.NewStore(t.TempDir())
 	if err := st.Init(); err != nil {

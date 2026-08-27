@@ -58,6 +58,16 @@ func TestCoverPromptSetRejectsLongOrDuplicateCandidates(t *testing.T) {
 	}
 }
 
+func TestHasCoverPromptSectionPreservesLegacyManualContent(t *testing.T) {
+	premise := "# 旧书\n\n## 封面提示词\n人工写的单份方案"
+	if !HasCoverPromptSection(premise) {
+		t.Fatal("legacy manual cover heading should be detected")
+	}
+	if HasCompleteCoverPromptSection(premise, "旧书") {
+		t.Fatal("manual legacy section is present but not the new five-plan format")
+	}
+}
+
 func TestUpsertCoverPromptSectionReplacesAndDeduplicates(t *testing.T) {
 	first := RenderCoverPromptSection(validCoverPromptSet("长夜燃灯"))
 	secondSet := validCoverPromptSet("长夜燃灯")
