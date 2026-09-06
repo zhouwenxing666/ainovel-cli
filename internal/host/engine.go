@@ -185,38 +185,16 @@ func (e *engine) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		// Writer 提交后，Reviewer 是不可绕过的章节质量闸。用户干预派单、失败
-		// reroute 和其它内存 next 都先留在原位，等 Reviewer 清除持久事实后再执行；
-		// 否则一次恰好到达提交边界的 Editor 派单会插到 Writer→Reviewer 中间。
-		var reviewerInst *flow.Instruction
-		progress, progressErr := e.store.Progress.Load()
-		if progressErr != nil {
-			e.pauseWithNotify(notify.KindWorkerFailure, "Reviewer 前置事实读取失败，已暂停: "+progressErr.Error())
-			return
-		}
-		if progress != nil && progress.PendingReviewChapter > 0 {
-			reviewerInst = flow.Route(flow.State{Progress: progress})
-			if reviewerInst == nil || reviewerInst.Agent != "reviewer" {
-				e.pauseWithNotify(notify.KindWorkerFailure, "Reviewer 前置路由无法从待审事实生成指令，已暂停")
-				return
-			}
-		}
 		// hold+dispatch 必须先让配对派单建立返工事实；其它情况在派发前统一检查
 		// Gate，保证 boundary hold 和无许可 review 不会多跑一个 Worker。
-		deferGate := e.nextDefersGate()
-		if reviewerInst == nil {
-			deferGate = e.applyPendingOps(ctx) || deferGate
-		}
+		deferGate := e.applyPendingOps(ctx) || e.nextDefersGate()
 		if !deferGate {
 			if e.gate.HandleBoundary() {
 				return
 			}
 		}
 
-		inst := reviewerInst
-		if inst == nil {
-			inst = e.takeNext()
-		}
+		inst := e.takeNext()
 		if inst == nil {
 			state, err := flow.LoadState(e.store)
 			if err != nil {
@@ -261,8 +239,7 @@ func (e *engine) run(ctx context.Context) {
 		if inst == nil {
 			continue // 僵局裁定要求重算路由
 		}
-		// trackDeadlock 可以让 Arbiter 改派。改派结果也必须重新过前置校验，
-		// 尤其不能在 PendingReviewChapter 尚在时绕过 Reviewer。
+		// trackDeadlock 可以让 Arbiter 改派；改派结果也必须重新过前置校验。
 		if instructionKey(inst) != precheckedKey {
 			replaced, err = e.precheck(inst)
 			if err != nil {
@@ -295,8 +272,7 @@ func (e *engine) run(ctx context.Context) {
 		if e.budget.HandleBoundary() {
 			return
 		}
-		// Reviewer 之前若已有 hold+dispatch next，保持“先执行配对派单再检查
-		// Gate”的原子语义；Reviewer 只延迟它，不得把它拆成孤立 hold。
+		// hold+dispatch 必须先执行配对派单再检查 Gate，不能拆成孤立 hold。
 		if !e.nextDefersGate() && e.gate.HandleBoundary() {
 			return
 		}
@@ -406,14 +382,6 @@ func (e *engine) precheck(inst *flow.Instruction) (*flow.Instruction, error) {
 		// 完本期唯一合法出路是 reopen(干预动作),任何派发直接丢弃。
 		slog.Warn("完本期派发被丢弃", "module", "engine", "agent", inst.Agent)
 		return &flow.Instruction{}, nil // 置空:下轮 Route 归 nil 自然停机
-	}
-	if progress != nil && progress.PendingReviewChapter > 0 && inst.Agent != "reviewer" {
-		reviewer := flow.Route(flow.State{Progress: progress})
-		if reviewer == nil || reviewer.Agent != "reviewer" {
-			return nil, fmt.Errorf("待审第 %d 章无法生成 Reviewer 指令: %w",
-				progress.PendingReviewChapter, errInvalidWriteTarget)
-		}
-		return reviewer, nil
 	}
 	if inst.Agent == "writer" {
 		if progress == nil || progress.Phase != domain.PhaseWriting {

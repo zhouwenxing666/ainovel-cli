@@ -29,7 +29,7 @@ Host(保留包名;内部新增 EngineLoop,不做纯机械改名)
   ├─ 明确语义场景 → 调 Arbiter 函数
   └─ 事件投影 / 预算 / 停靠点 / 通知(现职responsibility保留)
   ↓
-Workers(architect / writer / reviewer / editor,内部自主,checkpoint-delta 守卫保留)
+Workers(architect / writer / editor,内部自主,checkpoint-delta 守卫保留)
   ↓
 Tools → Store(唯一事实源)
 ```

@@ -23,7 +23,7 @@
 
 - **可枚举的状态迁移 → 代码**。"写完一章后派谁"是读事实查表：`flow.Route` 纯函数 + 万级组合穷举规格测试，错误率趋近 0、零 LLM 开销。
 - **边界清晰的语义判断 → LLM 函数（Arbiter）**。选规划师、用户干预分诊、失败/僵局出路：事实进、结构化决策出、机械校验兜底、每次裁定落盘可回放。
-- **开放式创作 → LLM 循环（Worker）**。一章、一次逐章润色、一次评审、一次规划之内，architect/writer/reviewer/editor 完全自主。
+- **开放式创作 → LLM 循环（Worker）**。一章、一次评审、一次规划之内，architect/writer/editor 完全自主。
 
 两平面对称是贯穿性纪律——未来任何新决策点照此形状，不发明新模式：
 
@@ -50,7 +50,7 @@ UI、诊断、事件日志都是从事件流 / 只读工件投影出来的被动
 只有三类事实：
 
 - **Progress** — 进度索引（写到第几章、待重写列表）
-- **Checkpoint** — step 级推进记录（plan / draft / commit / chapter_review / review / arc_summary）
+- **Checkpoint** — step 级推进记录（plan / draft / commit / review / arc_summary）
 - **Artifact** — 章节正文、大纲、角色、摘要等产物
 
 不引入 WorkflowInstance / TaskInstance / Command 等抽象。附属事实（大纲反馈池、机械违规记录、裁定审计）同样是扁平 jsonl，各有唯一生产者与消费者。
@@ -79,10 +79,10 @@ UI、诊断、事件日志都是从事件流 / 只读工件投影出来的被动
    └── usage / 预算 / 停靠点 / 模型管理
         │ 程序化调用 WorkerRunner.Run（进度经 ctx ToolProgress 中继）
 [HTTP agentcore loop / isolated Codex CLI task adapter]
-        │ architect_short/long · writer · reviewer · editor（各自独立 run + context + backend）
+        │ architect_short/long · writer · editor（各自独立 run + context + backend）
         │ 工具调用
 [Tools]  novel_context · read_chapter · plan_chapter · draft_chapter · edit_chapter
-         check_consistency · commit_chapter · finalize_reviewed_chapter · save_review · save_arc_summary
+         check_consistency · commit_chapter · save_review · save_arc_summary
          save_volume_summary · save_foundation
         │ 单文件原子 + 幂等重放（commit 使用持久化 Saga）
 [Store: 文件系统 (tmp + rename)]
@@ -118,7 +118,6 @@ type Progress struct {
     ChapterWordCounts map[int]int
     InProgressChapter int             // 正在写作的章节
     Flow              FlowState       // writing / reviewing / rewriting / polishing / steering
-    PendingReviewChapter int          // Writer 已提交、Reviewer 尚未完成的唯一章节
     PendingRewrites   []int
     StrandHistory     []string        // dominant_strand 序列
     HookHistory       []string        // hook_type 序列
@@ -189,7 +188,6 @@ Artifact 在 `store/outline.go` `drafts.go` `summaries.go` `characters.go` `worl
 | `edit_chapter` | drafts/chXX.draft.md | edit |
 | `check_consistency` | 无（只读，inline 返回） | consistency_check |
 | `commit_chapter` | chapters/chXX.md + Progress（+ 反馈池/违规记录 best-effort） | commit |
-| `finalize_reviewed_chapter` | chapters/chXX.md + Progress | chapter_review |
 | `save_review` | reviews/chXX.json（global 为 chXX-global.json） | review |
 | `save_arc_summary` | summaries/arc-vNNaNN.json | arc_summary |
 | `save_volume_summary` | summaries/vol-vNN.json | volume_summary |
@@ -236,7 +234,7 @@ Engine ── WorkerRunner.Run(agent, task) ──▶ HTTP AgentLoop / Codex CLI
                                                  Store（协作媒介）
 ```
 
-`bootstrap.ModelSet` 支持角色级模型：arbiter/architect/writer/reviewer/editor 各自独立配置与显式 fallback；未配置角色继承 Default。Arbiter 通过动态角色模型在每个调用边界解析当前选择，因此 `/model` 热切换无需重建 Host。HTTP Worker 的 fallback 和 Codex/HTTP 跨 backend fallback 都按完整任务处理：只有尚未成功执行非只读业务工具时才透明切换；已有副作用则返回 Engine，让下一轮从 Store/Checkpoint 事实恢复，禁止拼接两个 backend 的半截会话。
+`bootstrap.ModelSet` 支持角色级模型：arbiter/architect/writer/editor 各自独立配置与显式 fallback；未配置角色继承 Default。Arbiter 通过动态角色模型在每个调用边界解析当前选择，因此 `/model` 热切换无需重建 Host。HTTP Worker 的 fallback 和 Codex/HTTP 跨 backend fallback 都按完整任务处理：只有尚未成功执行非只读业务工具时才透明切换；已有副作用则返回 Engine，让下一轮从 Store/Checkpoint 事实恢复，禁止拼接两个 backend 的半截会话。
 
 Codex CLI backend 位于 `internal/codexcli`：只支持 macOS，本地配置只复用 `auth.json`；每次任务使用临时 `CODEX_HOME`、空 cwd、read-only sandbox、忽略用户 config/rules，并禁用原生工具。Worker 的 MCP server 注册静态角色 allowlist，工具执行仍发生在父进程，终态工具成功后锁住后续写操作。成功条件是终态业务工具产生的新 checkpoint；CLI 的退出码或 final text 不能单独证明任务完成。Arbiter与其他单次调用不注入 MCP，只使用 JSON Schema 输出和现有业务校验。
 
@@ -244,7 +242,7 @@ Codex CLI backend 位于 `internal/codexcli`：只支持 macOS，本地配置只
 
 Worker 之间不直接通信，所有信息流经 Store 中的结构化工件：
 
-**模式 A · 串行移交（主干）**：Route 派 Architect 规划 → Writer 提交一章 → Reviewer（Humanizer 检测/按需改写 → 台词情绪优化）→ 下一章 Writer 或弧末 Editor → Writer 重写。每一步“下一个派谁”由 Route 从事实推导；返工提交同样必须再次经过 Reviewer。
+**模式 A · 串行移交（主干）**：Route 派 Architect 规划 → Writer 提交一章 → 下一章 Writer 或弧末 Editor → Writer 重写。每一步“下一个派谁”由 Route 从事实推导。
 
 **模式 B · 反馈闭环**：Writer 在 commit 中报告大纲偏离 → 反馈池落盘（仅分层书）→ Architect 下次结构操作经 novel_context 参考 → 操作成功即消费清空。Writer 不直接呼叫 Architect，反馈经事实层流转。
 
@@ -258,8 +256,8 @@ Worker 之间不直接通信，所有信息流经 Store 中的结构化工件：
 
 | 层 | 落点 | 作用 |
 |---|---|---|
-| `StopAfterTools` / `StopAfterToolResult` | `agents/build.go` SubAgentConfig | 关键工具成功即退出 Worker run（终态退出仍咨询 StopGuard，见契约测试）。Writer `commit_chapter`、Reviewer `finalize_reviewed_chapter` 命中即停；Editor 的 `save_review`/`save_arc_summary`/`save_volume_summary`、Architect 弧/卷收尾走 `StopAfterToolResult` |
-| `CheckpointDeltaGuard` | `agents/guard/subagent_guards.go` | 以 baseline checkpoint 为分界，本轮结束前必须看到对应 step 的新 checkpoint，否则拒绝 `end_turn`；连续拦 3 次升级 terminate（弱模型死循环兜底）。Reviewer 必须落 `chapter_review`；Editor 的 guard 任务感知：被派生成摘要时仅复核不算完成 |
+| `StopAfterTools` / `StopAfterToolResult` | `agents/build.go` SubAgentConfig | 关键工具成功即退出 Worker run（终态退出仍咨询 StopGuard，见契约测试）。Writer `commit_chapter` 命中即停；Editor 的 `save_review`/`save_arc_summary`/`save_volume_summary`、Architect 弧/卷收尾走 `StopAfterToolResult` |
+| `CheckpointDeltaGuard` | `agents/guard/subagent_guards.go` | 以 baseline checkpoint 为分界，本轮结束前必须看到对应 step 的新 checkpoint，否则拒绝 `end_turn`；连续拦 3 次升级 terminate（弱模型死循环兜底）。Editor 的 guard 任务感知：被派生成摘要时仅复核不算完成 |
 | 工具内联 `next_step` | 各工具返回值字段 | 每个事实自带"下一步建议"，LLM 看到事实就知道下一步 |
 | 工具内归属/前置检查 | `edit_chapter` `commit_chapter` 等 | 数据层物理拦截：初稿定点编辑、改未入队的已完成章、空提交均被拒，`ConcurrencySafe=false` 阻止并发竞态 |
 
@@ -380,7 +378,7 @@ User: "一句话需求"
 | `AdvanceMode=review` + 精确 permit | `/review on`、`/next` | 持久政策：每个正向新章必须单独放行 |
 | `AdvanceHold` | Arbiter intervention | 一次性意图：当前边界或返工排空后暂停 |
 
-许可绑定章节号。目标章进入 CompletedChapters、PendingCommit 清空且 commit checkpoint 存在后消费写作许可，但 Engine 仍会放行该章 Reviewer；只有 `PendingReviewChapter` 清零后才停在下一章之前。因此提交或 Reviewer 任一窗口崩溃，都不会把半成品暴露为逐章验收结果。详细不变量见 [Chapter Advance Gate](chapter-advance-gate.md)。
+许可绑定章节号。目标章进入 CompletedChapters、PendingCommit 清空且 commit checkpoint 存在后消费写作许可，停在下一章之前。提交中断时先恢复未完成的提交，再对账许可。详细不变量见 [Chapter Advance Gate](chapter-advance-gate.md)。
 
 ---
 
@@ -412,7 +410,7 @@ internal/
 
 assets/
   prompts/        arbiter-plan-start / arbiter-intervention / arbiter-failure / architect-short|long
-                  / writer(协议模板,{{VOICE}} 占位) / reviewer / editor / import-* / simulation-*
+                  / writer(协议模板,{{VOICE}} 占位) / editor / import-* / simulation-*
   voice.md        写作标准(文风层内置默认;三层覆盖见 docs/voice-layer.md)
   references/     写作技巧 + anti-ai-tone + 体裁模板等
   styles/         默认/奇幻/言情/悬疑(用户可覆盖/新增)
@@ -432,7 +430,6 @@ assets/
 | 2026-07-12 | **Engine + Arbiter 控制面更替**：Coordinator 长循环及七项补丁生态退役；文风层三层覆盖；五轮对抗评审加固 | 每边界省一次 LLM 转发；控制面 100% 离线可测；语义裁定可回放 |
 | 2026-07-15 | **`/import` 语义编译管线**：硬编码切分规则退役，改为 ingest→segment→analyze→synthesize→publish 分阶段编译；纯状态推导（`NextAction(Facts)`）+ 输入指纹绑定工件，全程可恢复幂等 | 切分随模型能力自然增强；无漂移阶段枚举；中断可续、控制面离线可测 |
 | 2026-08-10 | **本机 Codex CLI backend**：saved login 驱动 Arbiter/Architect/Writer/Editor；隔离进程 + 每任务私有 MCP + 完整任务级 fallback | 无 API Key 复用本机 Codex；Engine/Store 工具契约与恢复语义保持不变 |
-| 2026-08-20 | **逐章 Reviewer 质量闸**：Writer 提交后固定 Humanizer 检测/按需改写 → 台词情绪优化；来源摘要、改写边界、排版和 5% 增幅由工具校验 | 下一章或 Editor 前必经逐章润色；无 AI 痕迹不做无效 Humanizer 改写；HTTP/Codex 均可运行 |
 
 实测：hy3-preview free 12 章 / 73 分钟、mimo-v2.5-pro 10 章 / 8.4 万字，均一次跑完；长篇 gpt-5.4《凡骨》235 章 / 127 万字滚动规划闭环跑通（Coordinator 时代数据，Engine 时代首跑待补）。
 
@@ -509,7 +506,7 @@ assets/
 - 四类职能 Worker（context 与模型独立，事实护栏零打扰）
 - 一组单文件原子、跨文件显式失败/幂等恢复的工具；其中 commit 使用持久化 Saga + 一个 jsonl checkpoint 文件
 
-模型升级的收益流向何处一目了然：创作更好（Writer/Architect/Reviewer/Editor 的全部输出）、裁定更准（Arbiter 四场景）、摘要更好（ctxpack）——全部换模型即得，外壳一行不改。控制面不吃模型红利，因为**查表不需要智力**；它需要的是被证明正确，而它已经被证明了。
+模型升级的收益流向何处一目了然：创作更好（Writer/Architect/Editor 的全部输出）、裁定更准（Arbiter 四场景）、摘要更好（ctxpack）——全部换模型即得，外壳一行不改。控制面不吃模型红利，因为**查表不需要智力**；它需要的是被证明正确，而它已经被证明了。
 
 流程刚性是有意的、标了价的、留了门的：想放开 writer 的工具顺序 → 松一段协议 prompt（不变量在工具层兜底）；想按弧派发 → Route 加一行分支；想扩裁定能力 → 加一对 Collect/Decide。每一次松绑都有裁判（穷举规格、文风评测、decisions 回放）——**用证据决定给模型多少绳子，而不是用信仰**。
 

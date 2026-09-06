@@ -37,9 +37,6 @@ func describeResume(store *storepkg.Store, progress *domain.Progress) (string, e
 		if pending != nil {
 			return fmt.Sprintf("恢复：第 %d 章提交中断", pending.Chapter), nil
 		}
-		if progress.PendingReviewChapter > 0 {
-			return fmt.Sprintf("恢复：Reviewer 处理第 %d 章", progress.PendingReviewChapter), nil
-		}
 		if len(progress.PendingRewrites) > 0 {
 			verb := "重写"
 			if progress.Flow == domain.FlowPolishing {

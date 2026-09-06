@@ -21,29 +21,17 @@ import (
 
 // CommitChapterTool 提交章节：加载正文 → 保存终稿 → 生成摘要 → 更新状态 → 更新进度。
 type CommitChapterTool struct {
-	store         *store.Store
-	styleStats    *StyleStatsIndex
-	requireReview bool
+	store      *store.Store
+	styleStats *StyleStatsIndex
 }
 
 // NewCommitChapterTool 创建提交工具。styleStats 必须与 novel_context 共享，
 // 保证新增、重写与恢复完成后刷新同一份统计索引。
 func NewCommitChapterTool(store *store.Store, styleStats *StyleStatsIndex) *CommitChapterTool {
-	return newCommitChapterTool(store, styleStats, true)
-}
-
-// NewImportCommitChapterTool 供外部小说导入管线复用提交 Saga。导入正文已经由
-// import analyze/synthesize 管线处理，不属于 Writer → Reviewer 创作链，因此不会
-// 为每个导入章节建立 Reviewer 阻塞事实。
-func NewImportCommitChapterTool(store *store.Store, styleStats *StyleStatsIndex) *CommitChapterTool {
-	return newCommitChapterTool(store, styleStats, false)
-}
-
-func newCommitChapterTool(store *store.Store, styleStats *StyleStatsIndex, requireReview bool) *CommitChapterTool {
 	if styleStats == nil {
 		panic("tools: NewCommitChapterTool requires StyleStatsIndex")
 	}
-	return &CommitChapterTool{store: store, styleStats: styleStats, requireReview: requireReview}
+	return &CommitChapterTool{store: store, styleStats: styleStats}
 }
 
 // commitOutput 在 domain.CommitResult 之上嵌入扩展字段，保持 domain 包不依赖 rules。
@@ -361,13 +349,6 @@ func (t *CommitChapterTool) Execute(_ context.Context, args json.RawMessage) (js
 			return nil, fmt.Errorf("mark chapter complete: %w: %w", errs.ErrStoreWrite, err)
 		}
 	}
-	// 与 MarkChapterComplete 分开幂等补写：若进程恰在“完成章 → 建立 Reviewer
-	// 事实”之间崩溃，PendingCommit 的 StateApplied 恢复也必须重新建立质量闸。
-	if t.requireReview {
-		if err := t.store.Progress.RequireChapterReview(a.Chapter); err != nil {
-			return nil, fmt.Errorf("enqueue chapter reviewer: %w: %w", errs.ErrStoreWrite, err)
-		}
-	}
 
 	// 6. 判断是否需要审阅
 	progress, err = t.store.Progress.Load()
@@ -636,11 +617,6 @@ func (t *CommitChapterTool) executeRewriteCommit(a commitArgs, progress *domain.
 		if err := t.store.Progress.MarkChapterComplete(chapter, wordCount, a.HookType, a.DominantStrand); err != nil {
 			return nil, fmt.Errorf("rewrite: update word count: %w: %w", errs.ErrStoreWrite, err)
 		}
-		if t.requireReview {
-			if err := t.store.Progress.RequireChapterReview(chapter); err != nil {
-				return nil, fmt.Errorf("rewrite: enqueue chapter reviewer: %w: %w", errs.ErrStoreWrite, err)
-			}
-		}
 
 		// 5. Drain 待处理队列；队列空时 CompleteRewrite 会自动把 flow 切回 writing
 		if err := t.store.Progress.CompleteRewrite(chapter); err != nil {
@@ -673,7 +649,7 @@ func (t *CommitChapterTool) executeRewriteCommit(a commitArgs, progress *domain.
 	//     即重新完结——若因返工扰动了某条线索就卡在 writing，终卷末会落到越界续写死循环。
 	//   - 非分层：写满 TotalChapters 即完结（返工不增减章数，原本就满）。
 	bookComplete := false
-	if drained && latest != nil && latest.PendingReviewChapter == 0 {
+	if drained && latest != nil {
 		reComplete := false
 		switch {
 		case latest.Layered && latest.ReopenedFromComplete:
@@ -840,11 +816,6 @@ func (t *CommitChapterTool) applyCompletion(result *domain.CommitResult, progres
 	if progress.Phase == domain.PhaseComplete {
 		return true, nil
 	}
-	// Writer 提交后的正文还不是最终文本。必须等 Reviewer 完成 Humanizer +
-	// 情绪优化质量闸；非分层完本由 Reviewer 工具在清除该事实时原子推进。
-	if progress.PendingReviewChapter > 0 {
-		return false, nil
-	}
 	if progress.Layered {
 		complete, err := layeredComplete(t.store, progress)
 		if err != nil {
@@ -880,10 +851,6 @@ func (t *CommitChapterTool) applyCompletion(result *domain.CommitResult, progres
 func layeredStructurallyComplete(st *store.Store, progress *domain.Progress) (bool, error) {
 	// 1. 返工队列必须清空
 	if len(progress.PendingRewrites) > 0 {
-		return false, nil
-	}
-	// Writer 的最后一次提交还未经过 Reviewer 时，结构也不能视为完成。
-	if progress.PendingReviewChapter > 0 {
 		return false, nil
 	}
 	volumes, err := st.Outline.LoadLayeredOutline()

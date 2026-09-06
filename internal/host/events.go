@@ -54,7 +54,6 @@ type UISnapshot struct {
 	TotalWordCount       int
 	InProgressChapter    int
 	PendingRewrites      []int
-	PendingReviewChapter int
 	RewriteReason        string
 	PendingSteer         string
 	AdvanceMode          string

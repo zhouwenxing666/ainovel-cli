@@ -31,7 +31,7 @@ type References struct {
 	LongformPlanning string // 通用长篇规划参考
 	Differentiation  string // 通用差异化设计参考
 	ArcTemplates     string // 题材弧型模板（按 style 加载，可为空）
-	AntiAITone       string // 去 AI 味判据库（writer/reviewer/editor 共用，全程注入）
+	AntiAITone       string // 去 AI 味判据库（writer/editor 共用，全程注入）
 }
 
 // ContextTool 组装当前章节所需上下文。
@@ -71,7 +71,7 @@ func (t *ContextTool) ConcurrencySafe(_ json.RawMessage) bool { return true }
 
 func (t *ContextTool) Schema() map[string]any {
 	return schema.Object(
-		schema.Property("chapter", schema.Int("章节号。不传则返回进度状态和基础设定（Architect 用）；传入则额外返回该章的写作上下文（Writer/Reviewer/Editor 用）")),
+		schema.Property("chapter", schema.Int("章节号。不传则返回进度状态和基础设定（Architect 用）；传入则额外返回该章的写作上下文（Writer/Editor 用）")),
 	)
 }
 
@@ -99,7 +99,7 @@ func (t *ContextTool) Execute(_ context.Context, args json.RawMessage) (json.Raw
 	}
 
 	if a.Chapter > 0 {
-		// 章节路径（Writer/Reviewer/Editor）：加载全量基础数据 + 章节上下文
+		// 章节路径（Writer/Editor）：加载全量基础数据 + 章节上下文
 		t.buildBaseContext(result, warn)
 		seed := newChapterContextEnvelope()
 		state := t.prepareChapterContext(a.Chapter, &seed, warn)

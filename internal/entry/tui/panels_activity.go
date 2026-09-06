@@ -206,8 +206,6 @@ func eventAgentColor(agent string) lipgloss.AdaptiveColor {
 		return colorAccent2
 	case agent == "writer":
 		return colorTool
-	case agent == "reviewer":
-		return colorAccent
 	case agent == "editor":
 		return colorReview
 	default:

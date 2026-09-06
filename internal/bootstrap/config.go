@@ -248,7 +248,6 @@ var knownRoles = map[string]bool{
 	"arbiter":           true,
 	"architect":         true,
 	"writer":            true,
-	"reviewer":          true,
 	"editor":            true,
 	"import_segment":    true,
 	"import_analyze":    true,
@@ -375,7 +374,7 @@ func (c *Config) ValidateBase() error {
 			return err
 		}
 		if !knownRoles[role] {
-			return fmt.Errorf("unknown role %q in roles config (valid: arbiter/architect/writer/reviewer/editor/import_segment/import_analyze/import_synthesize): %w", role, errs.ErrConfig)
+			return fmt.Errorf("unknown role %q in roles config (valid: arbiter/architect/writer/editor/import_segment/import_analyze/import_synthesize): %w", role, errs.ErrConfig)
 		}
 		if rc.Provider == "" || rc.Model == "" {
 			return fmt.Errorf("role %q must have both provider and model: %w", role, errs.ErrConfig)
@@ -523,6 +522,8 @@ func (c *Config) DefaultProviderConfig() ProviderConfig {
 
 // FillDefaults 填充默认值。
 func (c *Config) FillDefaults() {
+	// 旧版逐章润色角色已移除；不再校验或初始化它的模型与 fallback。
+	delete(c.Roles, "reviewer")
 	if c.OutputDir == "" {
 		c.OutputDir = filepath.Join("output", "novel")
 	}

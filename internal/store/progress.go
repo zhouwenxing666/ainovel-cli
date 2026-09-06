@@ -203,66 +203,6 @@ func (s *ProgressStore) MarkChapterComplete(chapter, wordCount int, hookType, do
 	})
 }
 
-// RequireChapterReview 在 Writer 的 commit Saga 中登记 Reviewer 质量闸。
-// 它与 MarkChapterComplete 分离：后者也是导入、测试夹具和状态修复的通用原语，
-// 只有真实 Writer 提交才应自动进入 Reviewer 流水线。
-func (s *ProgressStore) RequireChapterReview(chapter int) error {
-	return s.io.WithWriteLock(func() error {
-		p, err := s.loadUnlocked()
-		if err != nil {
-			return err
-		}
-		if p == nil || !slices.Contains(p.CompletedChapters, chapter) {
-			return fmt.Errorf("第 %d 章尚未提交，不能登记 Reviewer: %w", chapter, errs.ErrToolPrecondition)
-		}
-		if p.PendingReviewChapter > 0 && p.PendingReviewChapter != chapter {
-			return fmt.Errorf("第 %d 章仍待 Reviewer，不能登记第 %d 章: %w",
-				p.PendingReviewChapter, chapter, errs.ErrToolConflict)
-		}
-		p.PendingReviewChapter = chapter
-		return s.saveUnlocked(p)
-	})
-}
-
-// CompleteChapterReview 原子更新 Reviewer 改写后的字数并清除待处理标记。
-// complete=true 时在同一次 progress 写入里进入完结态，避免“已清队列但尚未完结”
-// 的崩溃窗口。正文与 checkpoint 由 Reviewer 工具在调用本方法前先行落盘。
-func (s *ProgressStore) CompleteChapterReview(chapter, wordCount int, complete bool) error {
-	return s.io.WithWriteLock(func() error {
-		p, err := s.loadUnlocked()
-		if err != nil {
-			return err
-		}
-		if p == nil {
-			return fmt.Errorf("progress 未初始化: %w", errs.ErrToolPrecondition)
-		}
-		if p.PendingReviewChapter != chapter {
-			return fmt.Errorf("Reviewer 目标章不匹配：待处理第 %d 章，收到第 %d 章: %w",
-				p.PendingReviewChapter, chapter, errs.ErrToolConflict)
-		}
-		if !slices.Contains(p.CompletedChapters, chapter) {
-			return fmt.Errorf("第 %d 章尚未提交，不能完成 Reviewer: %w", chapter, errs.ErrToolPrecondition)
-		}
-		if p.ChapterWordCounts == nil {
-			p.ChapterWordCounts = make(map[int]int)
-		}
-		if old, ok := p.ChapterWordCounts[chapter]; ok {
-			p.TotalWordCount -= old
-		}
-		p.ChapterWordCounts[chapter] = wordCount
-		p.TotalWordCount += wordCount
-		p.PendingReviewChapter = 0
-		if complete {
-			if err := domain.ValidatePhaseTransition(p.Phase, domain.PhaseComplete); err != nil {
-				return err
-			}
-			p.Phase = domain.PhaseComplete
-			p.ReopenedFromComplete = false
-		}
-		return s.saveUnlocked(p)
-	})
-}
-
 // MarkComplete 标记全书创作完成，并清除重开返工标记（完结即不再处于返工态）。
 func (s *ProgressStore) MarkComplete() error {
 	return s.io.WithWriteLock(func() error {
@@ -538,10 +478,6 @@ func (s *ProgressStore) ValidateChapterWork(chapter int) error {
 	}
 	if p.Phase != domain.PhaseWriting {
 		return fmt.Errorf("章节写作仅允许在 writing 阶段（当前 phase=%s）: %w", p.Phase, errs.ErrToolPrecondition)
-	}
-	if p.PendingReviewChapter > 0 {
-		return fmt.Errorf("第 %d 章尚待 Reviewer 去 AI 味与情绪优化，完成前不能开始其它章节工作: %w",
-			p.PendingReviewChapter, errs.ErrToolConflict)
 	}
 	if p.Flow != domain.FlowRewriting && p.Flow != domain.FlowPolishing {
 		return nil

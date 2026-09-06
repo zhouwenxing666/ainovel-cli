@@ -123,6 +123,10 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 	if err := store.RunMeta.Init(cfg.Style, cfg.Provider, cfg.ModelName); err != nil {
 		return nil, fmt.Errorf("init run meta: %w", err)
 	}
+	styleStats := tools.NewStyleStatsIndex(store)
+	if err := tools.MigrateLegacyChapterProgress(store, styleStats); err != nil {
+		return nil, fmt.Errorf("migrate chapter progress: %w", err)
+	}
 
 	models, err := bootstrap.NewModelSet(cfg)
 	if err != nil {
@@ -155,7 +159,6 @@ func New(cfg bootstrap.Config, bundle assets.Bundle) (*Host, error) {
 
 	// onGuardBlock 前置声明:h 构造后才能挂事件浮出闭包。
 	var onGuardBlock func(agent, reason string, consecutive int32)
-	styleStats := tools.NewStyleStatsIndex(store)
 	workers, restore, applyThinking := agents.BuildWorkers(cfg, store, styleStats, models, bundle, usage.Record,
 		func(agent, reason string, consecutive int32) {
 			if onGuardBlock != nil {
@@ -1148,7 +1151,6 @@ func (h *Host) Snapshot() UISnapshot {
 		snap.TotalWordCount = progress.TotalWordCount
 		snap.InProgressChapter = progress.InProgressChapter
 		snap.PendingRewrites = progress.PendingRewrites
-		snap.PendingReviewChapter = progress.PendingReviewChapter
 		snap.RewriteReason = progress.RewriteReason
 		snap.Layered = progress.Layered
 		if progress.CurrentVolume > 0 {
@@ -1363,7 +1365,7 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 	window, source := h.cfg.ResolveContextWindow(provider, model)
 	bootstrap.LogContextWindowChoice(logRole, model, window, source)
 
-	// 无常驻上下文需要联动:writer/architect/reviewer/editor 的 ContextManager 走
+	// 无常驻上下文需要联动:writer/architect/editor 的 ContextManager 走
 	// ContextManagerFactory,下次 spawn 自动按新模型窗口重建。
 
 	h.emitEvent(Event{
@@ -1377,7 +1379,7 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 
 // concreteThinkingRoles 是可应用推理强度的具体角色（与 agents.ApplyThinking 路由一致）。
 // 调 default 时按各角色 ResolveReasoningEffort 逐个重新应用。
-var concreteThinkingRoles = []string{"arbiter", "architect", "writer", "reviewer", "editor"}
+var concreteThinkingRoles = []string{"arbiter", "architect", "writer", "editor"}
 
 // CurrentThinking 返回某角色当前生效的推理强度原始串（供 /model 面板同步当前值）。
 func (h *Host) CurrentThinking(role string) string {
@@ -1606,7 +1608,7 @@ func (h *Host) ImportFrom(ctx context.Context, opts imp.Options) (<-chan imp.Eve
 
 	deps := imp.Deps{
 		Store:         h.store,
-		CommitChapter: tools.NewImportCommitChapterTool(h.store, h.styleStats),
+		CommitChapter: tools.NewCommitChapterTool(h.store, h.styleStats),
 		Segment:       h.importCaller("segment"),
 		Analyze:       h.importCaller("analyze"),
 		Synthesize:    h.importCaller("synthesize"),

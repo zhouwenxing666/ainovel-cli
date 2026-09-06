@@ -21,7 +21,6 @@ type expectKind int
 
 const (
 	expectNil expectKind = iota
-	expectReviewer
 	expectRewrite
 	expectArcReview
 	expectArcSummary
@@ -40,11 +39,10 @@ const (
 //  2. 规划期（非写作期）：设定缺项且规划师可判定（save_foundation 已落过 scale）
 //     → 照缺项续派同一规划师；否则 → LLM 裁定（nil，含首次规划师选型）
 //  3. Writing 旧书缺 cover_prompt → 规划师迁移（压过所有写作事务）
-//  4. 待 Reviewer 章节 → reviewer（优先于下一次 Writer 与 Editor）
-//  5. 重写/打磨队列非空 → writer 按队列头（压过弧末事务）
-//  6. Flow=Reviewing / Steering → LLM 裁定（nil）
-//  7. 分层模式弧末 → 评审 → 弧摘要 → (卷末)卷摘要 → 展开下一弧 → 追加新卷
-//  8. 其余 → writer 续写下一章
+//  4. 重写/打磨队列非空 → writer 按队列头（压过弧末事务）
+//  5. Flow=Reviewing / Steering → LLM 裁定（nil）
+//  6. 分层模式弧末 → 评审 → 弧摘要 → (卷末)卷摘要 → 展开下一弧 → 追加新卷
+//  7. 其余 → writer 续写下一章
 func expectedInstruction(s State) expectKind {
 	p := s.Progress
 	if p == nil || p.Phase == domain.PhaseComplete {
@@ -58,9 +56,6 @@ func expectedInstruction(s State) expectKind {
 	}
 	if slices.Contains(s.FoundationMissing, "cover_prompt") {
 		return expectCoverMigration
-	}
-	if p.PendingReviewChapter > 0 {
-		return expectReviewer
 	}
 	if len(p.PendingRewrites) > 0 {
 		return expectRewrite
@@ -99,8 +94,6 @@ func classify(t *testing.T, inst *Instruction) expectKind {
 		return expectNil
 	}
 	switch inst.Agent {
-	case "reviewer":
-		return expectReviewer
 	case "writer":
 		switch {
 		case contains(inst.Task, "重写") || contains(inst.Task, "打磨"):
@@ -216,7 +209,6 @@ func TestRoute_ExhaustiveAgainstSpec(t *testing.T) {
 	phases := []domain.Phase{domain.PhaseInit, domain.PhasePremise, domain.PhaseOutline, domain.PhaseWriting, domain.PhaseComplete}
 	flows := []domain.FlowState{domain.FlowWriting, domain.FlowReviewing, domain.FlowRewriting, domain.FlowPolishing, domain.FlowSteering}
 	queues := [][]int{nil, {7, 9}}
-	pendingReviews := []int{0, 5}
 	// {1..5} 命中 ReviewInterval(=5)的全局审阅触发点
 	completedSets := [][]int{nil, {1, 2, 3}, {1, 2, 3, 4, 5}}
 	missingSets := [][]string{nil, {"characters", "world_rules"}, {"cover_prompt"}, {"characters", "cover_prompt"}}
@@ -227,53 +219,50 @@ func TestRoute_ExhaustiveAgainstSpec(t *testing.T) {
 	for _, phase := range phases {
 		for _, fl := range flows {
 			for _, queue := range queues {
-				for _, pendingReview := range pendingReviews {
-					for _, layered := range []bool{false, true} {
-						for _, completed := range completedSets {
-							for _, missing := range missingSets {
-								for _, tier := range tiers {
-									for _, hasGlobal := range globalReviews {
-										for _, bc := range enumerateBoundaryCases() {
-											total++
-											p := &domain.Progress{
-												Phase:                phase,
-												Flow:                 fl,
-												Layered:              layered,
-												CompletedChapters:    append([]int(nil), completed...),
-												PendingRewrites:      append([]int(nil), queue...),
-												PendingReviewChapter: pendingReview,
-											}
-											last := 0
-											if n := len(completed); n > 0 {
-												last = completed[n-1]
-											}
-											s := State{
-												Progress:          p,
-												LastCompleted:     last,
-												ArcBoundary:       bc.boundary,
-												HasArcReview:      bc.hasArcReview,
-												HasArcSummary:     bc.hasArcSummary,
-												HasVolumeSummary:  bc.hasVolumeSummary,
-												FoundationMissing: append([]string(nil), missing...),
-												PlanningTier:      tier,
-												HasGlobalReview:   hasGlobal,
-											}
+				for _, layered := range []bool{false, true} {
+					for _, completed := range completedSets {
+						for _, missing := range missingSets {
+							for _, tier := range tiers {
+								for _, hasGlobal := range globalReviews {
+									for _, bc := range enumerateBoundaryCases() {
+										total++
+										p := &domain.Progress{
+											Phase:             phase,
+											Flow:              fl,
+											Layered:           layered,
+											CompletedChapters: append([]int(nil), completed...),
+											PendingRewrites:   append([]int(nil), queue...),
+										}
+										last := 0
+										if n := len(completed); n > 0 {
+											last = completed[n-1]
+										}
+										s := State{
+											Progress:          p,
+											LastCompleted:     last,
+											ArcBoundary:       bc.boundary,
+											HasArcReview:      bc.hasArcReview,
+											HasArcSummary:     bc.hasArcSummary,
+											HasVolumeSummary:  bc.hasVolumeSummary,
+											FoundationMissing: append([]string(nil), missing...),
+											PlanningTier:      tier,
+											HasGlobalReview:   hasGlobal,
+										}
 
-											before := snapshotState(s)
-											inst := Route(s)
-											want := expectedInstruction(s)
-											got := classify(t, inst)
-											if got != want {
-												t.Fatalf("phase=%s flow=%s queue=%v pending_review=%d layered=%v completed=%v missing=%v tier=%q global=%v boundary=%s:\n规格期望 %d，实现返回 %d（inst=%+v）",
-													phase, fl, queue, pendingReview, layered, completed, missing, tier, hasGlobal, bc.name, want, got, inst)
-											}
-											assertConservation(t, s, inst)
-											if !reflect.DeepEqual(before, snapshotState(s)) {
-												t.Fatalf("Route 必须是纯函数，不得改写输入 State（boundary=%s）", bc.name)
-											}
-											if again := Route(s); !reflect.DeepEqual(inst, again) {
-												t.Fatalf("Route 必须确定：两次调用结果不同（boundary=%s）", bc.name)
-											}
+										before := snapshotState(s)
+										inst := Route(s)
+										want := expectedInstruction(s)
+										got := classify(t, inst)
+										if got != want {
+											t.Fatalf("phase=%s flow=%s queue=%v layered=%v completed=%v missing=%v tier=%q global=%v boundary=%s:\n规格期望 %d，实现返回 %d（inst=%+v）",
+												phase, fl, queue, layered, completed, missing, tier, hasGlobal, bc.name, want, got, inst)
+										}
+										assertConservation(t, s, inst)
+										if !reflect.DeepEqual(before, snapshotState(s)) {
+											t.Fatalf("Route 必须是纯函数，不得改写输入 State（boundary=%s）", bc.name)
+										}
+										if again := Route(s); !reflect.DeepEqual(inst, again) {
+											t.Fatalf("Route 必须确定：两次调用结果不同（boundary=%s）", bc.name)
 										}
 									}
 								}
@@ -311,10 +300,6 @@ func assertConservation(t *testing.T, s State, inst *Instruction) {
 		return
 	}
 	switch inst.Agent {
-	case "reviewer":
-		if p.PendingReviewChapter <= 0 || inst.Chapter != p.PendingReviewChapter {
-			t.Fatalf("reviewer 必须处理待质量闸章节 %d：%+v", p.PendingReviewChapter, inst)
-		}
 	case "writer":
 		if inst.Chapter <= 0 {
 			t.Fatalf("writer 指令必须带章节号：%+v", inst)

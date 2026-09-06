@@ -18,7 +18,7 @@ func testDeps(st *store.Store, m callModel) Deps {
 	c := Caller{Model: m}
 	return Deps{
 		Store:         st,
-		CommitChapter: tools.NewImportCommitChapterTool(st, tools.NewStyleStatsIndex(st)),
+		CommitChapter: tools.NewCommitChapterTool(st, tools.NewStyleStatsIndex(st)),
 		Segment:       c,
 		Analyze:       c,
 		Synthesize:    c,

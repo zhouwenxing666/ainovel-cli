@@ -65,14 +65,13 @@ type AdvanceHold struct {
 3. `auto` 下许可必须为 `0`。
 4. `review` 下许可只能为 `0` 或一个正整数章节号。
 5. 同目标重复授权幂等，不同目标不得覆盖在途许可。
-6. 许可仅约束“开始尚未完成的正向新章”；规划、Reviewer、Editor 评审、返工、打磨和提交恢复不受阻断。
+6. 许可仅约束“开始尚未完成的正向新章”；规划、Editor 评审、返工、打磨和提交恢复不受阻断。
 7. 许可与章节号绑定，不与某次进程运行或某次 Worker 调用绑定。
 8. 只有目标章已经进入 `CompletedChapters`、对应 `PendingCommit` 已清空、且存在该章 `commit` checkpoint 时，许可才算稳定消费。
-9. 许可消费后，目标章若仍有 `PendingReviewChapter`，Engine 必须继续放行 Reviewer；Reviewer 清零前不得开始下一章或触发边界暂停。
-10. 目标章已完成但缺 commit checkpoint 属于状态损坏：显式报错并暂停，不猜测修复。
-11. 未完成许可必须等于 `Progress.NextChapter()`。`PendingRewrites` 不改变 `NextChapter()`，所以返工与在途正向许可可以机械共存。
-12. `AdvanceHold` 只能使用 `boundary` 或 `rewrites_drained`，且必须携带非空原因。
-13. hold 与许可使用 compare-and-clear；状态被新动作替换时不得误清。
+9. 目标章已完成但缺 commit checkpoint 属于状态损坏：显式报错并暂停，不猜测修复。
+10. 未完成许可必须等于 `Progress.NextChapter()`。`PendingRewrites` 不改变 `NextChapter()`，所以返工与在途正向许可可以机械共存。
+11. `AdvanceHold` 只能使用 `boundary` 或 `rewrites_drained`，且必须携带非空原因。
+12. hold 与许可使用 compare-and-clear；状态被新动作替换时不得误清。
 
 ## 4. Store API
 
@@ -110,7 +109,6 @@ func StartsForwardChapter(
 - Worker 是 `writer`；
 - phase 为 `writing`；
 - 没有 `PendingCommit`；
-- 没有 `PendingReviewChapter`；
 - 没有返工队列；
 - 没有 `InProgressChapter`；
 - 目标章等于 `NextChapter()`。
@@ -125,7 +123,7 @@ func StartsForwardChapter(
 - `consume`：完本态只需清理意图；
 - `consume-and-stop`：清理意图并暂停。
 
-`boundary` 在当前章节 Reviewer 完成后的 Worker 边界触发；`rewrites_drained` 等返工队列排空且最后一个返工章 Reviewer 完成后触发。未知条件和缺失事实直接报错。
+`boundary` 在当前 Worker 完成后的边界触发；`rewrites_drained` 等返工队列排空后触发。未知条件和缺失事实直接报错。
 
 ## 6. ChapterAdvanceGate
 
@@ -182,11 +180,10 @@ Arbiter 可以把“重写第 3 章，改完让我看”裁成：
 | 目标章未完成、无 PendingCommit | 保留许可，允许开始/恢复该章 |
 | PendingCommit 属于目标章 | 保留许可，让提交恢复完成 |
 | 目标章完成、PendingCommit 清空、commit checkpoint 存在 | 消费许可 |
-| 许可已消费、PendingReviewChapter 属于目标章 | 放行 Reviewer，完成后暂停于下一章前 |
 | 目标章完成但 checkpoint 缺失 | 报错并暂停 |
 | 许可指向非 NextChapter 的未完成章 | 报错并暂停 |
 
-因此进程在草稿、状态写入、进度标记、信号写入或 Reviewer 落盘任一窗口崩溃，都不会把同一个许可错误用于下一章，也不会把尚未润色的章节交给用户验收。
+因此进程在草稿、状态写入、进度标记、信号写入任一窗口崩溃，都不会把同一个许可错误用于下一章，也不会把尚未稳定提交的章节交给用户验收。
 
 ## 8. Arbiter
 
@@ -253,7 +250,7 @@ Engine 直接调用 RunMetaStore 应用结构化动作，不把它伪装成 LLM 
 - PendingCommit 期间许可保留，稳定 commit 后消费；
 - 完成标记与 checkpoint 冲突时暂停；
 - permit 与 PendingRewrites 交错不误报；
-- Engine 端到端证明一个许可恰好只稳定一个经过 Reviewer 的新章节；
+- Engine 端到端证明一个许可恰好只稳定一个新章节；
 - Gate 已标记暂停但旧 Engine goroutine 尚在退出时，`/next` 明确拒绝重入，稍后重试按同章许可幂等恢复；
 - hold-only、hold+dispatch 和退出竞态回归。
 

@@ -262,7 +262,7 @@ func TestFailureDecision_CoverMigrationCannotBeBypassed(t *testing.T) {
 		Phase:         string(domain.PhaseWriting),
 		FoundationGap: []string{"cover_prompt"},
 	}
-	for _, agent := range []string{"writer", "reviewer", "editor"} {
+	for _, agent := range []string{"writer", "editor"} {
 		d := FailureDecision{
 			Action:   "reroute",
 			Dispatch: &DispatchOp{Agent: agent, Task: "先继续原写作事务"},

@@ -49,14 +49,9 @@ type Progress struct {
 	CompletedScenes   []int       `json:"completed_scenes,omitempty"`    // 当前章节已完成的场景编号
 	Flow              FlowState   `json:"flow,omitempty"`                // 当前流程
 	PendingRewrites   []int       `json:"pending_rewrites,omitempty"`    // 待重写章节队列
-	// PendingReviewChapter 是 Writer 最近一次提交后必须交给 Reviewer 处理的章节。
-	// Engine 单线程且 Reviewer 的路由优先级高于下一次 Writer，故同时最多一个。
-	// 该字段让“每章提交 → 去 AI 味 → 情绪优化”成为可恢复事实，而非易丢失的
-	// commit 返回值或提示词约定。
-	PendingReviewChapter int      `json:"pending_review_chapter,omitempty"`
-	RewriteReason        string   `json:"rewrite_reason,omitempty"` // 重写原因
-	StrandHistory        []string `json:"strand_history,omitempty"` // 按章节顺序记录 dominant_strand
-	HookHistory          []string `json:"hook_history,omitempty"`   // 按章节顺序记录 hook_type
+	RewriteReason     string      `json:"rewrite_reason,omitempty"`      // 重写原因
+	StrandHistory     []string    `json:"strand_history,omitempty"`      // 按章节顺序记录 dominant_strand
+	HookHistory       []string    `json:"hook_history,omitempty"`        // 按章节顺序记录 hook_type
 	// 长篇分层追踪（仅长篇模式使用，短篇/中篇为零值）
 	CurrentVolume int  `json:"current_volume,omitempty"`
 	CurrentArc    int  `json:"current_arc,omitempty"`

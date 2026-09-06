@@ -685,8 +685,6 @@ func agentOrder(name string) int {
 	switch {
 	case strings.HasPrefix(name, "architect"):
 		return 0
-	case name == "reviewer":
-		return 2
 	case name == "editor":
 		return 3
 	case name == "writer":

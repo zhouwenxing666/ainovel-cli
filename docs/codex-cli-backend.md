@@ -2,7 +2,7 @@
 
 > 状态：已完成  
 > 日期：2026-08-09  
-> 范围：让用户通过本机 Codex CLI 登录，为 Arbiter、Architect、Writer、Reviewer、Editor 以及正常流程中的单次语义调用提供模型能力；不要求 API Key。
+> 范围：让用户通过本机 Codex CLI 登录，为 Arbiter、Architect、Writer、Editor 以及正常流程中的单次语义调用提供模型能力；不要求 API Key。
 
 ## 1. 目标与完成定义
 
@@ -11,7 +11,7 @@
 功能只有在以下能力全部可用时才标记为正式支持：
 
 - Arbiter 通过无工具、ephemeral、JSON Schema 约束的 `codex exec` 完成裁定，结果继续通过现有业务校验和审计。
-- Architect、Writer、Reviewer、Editor 通过独立 `CodexWorkerBackend` 运行，只能调用该角色当前已有的小说工具。
+- Architect、Writer、Editor 通过独立 `CodexWorkerBackend` 运行，只能调用该角色当前已有的小说工具。
 - 用户规则归一化、共创、导入、仿写等单次调用可以使用 Codex default，不产生隐藏的 API Key 依赖。
 - setup、`/config`、`/model`、热切换、fallback、usage、诊断、恢复和文档完整支持。
 - fake Codex CLI 的离线端到端测试覆盖成功、失败、取消、超时、JSONL、Schema、MCP 和部分副作用恢复。
@@ -153,13 +153,13 @@
 ### Slice G：发布验证
 
 - 单包测试逐 slice 红→绿；随后运行 `go test ./...`。
-- fake CLI E2E 必须覆盖 Arbiter、Architect、Writer、Reviewer、Editor 各一条成功路径。
+- fake CLI E2E 必须覆盖 Arbiter、Architect、Writer、Editor 各一条成功路径。
 - 可选真实 smoke test必须显式 opt-in，默认测试绝不消耗 Codex quota。
 - 更新 README、architecture、配置示例和诊断说明；说明 token/预算、平台与隐私限制。
 
 ## 5. 实施结果与验证
 
-上述切片已经全部落地：配置、macOS 预检、隔离进程 runtime、无工具 completion adapter、私有 MCP bridge、Hybrid WorkerRunner、Arbiter 角色模型、task-level fallback、热切换、setup/TUI、usage 与文档均已接通。Codex completion adapter 会递归把共享输出契约规范化为 Codex strict JSON Schema，用户只需配置模型，不需要设置 `json_schema:false`。fake CLI 通过真实子进程边界覆盖 Arbiter 风格的 Schema 调用以及 Architect short/long、Writer、Reviewer、Editor 五条 Worker 路径；副作用前 fallback、写入尝试后的 fail-closed 恢复、取消、进程组回收和终态锁定均有回归测试。
+上述切片已经全部落地：配置、macOS 预检、隔离进程 runtime、无工具 completion adapter、私有 MCP bridge、Hybrid WorkerRunner、Arbiter 角色模型、task-level fallback、热切换、setup/TUI、usage 与文档均已接通。Codex completion adapter 会递归把共享输出契约规范化为 Codex strict JSON Schema，用户只需配置模型，不需要设置 `json_schema:false`。fake CLI 通过真实子进程边界覆盖 Arbiter 风格的 Schema 调用以及 Architect short/long、Writer、Editor 四条 Worker 路径；副作用前 fallback、写入尝试后的 fail-closed 恢复、取消、进程组回收和终态锁定均有回归测试。
 
 发布前验证结果：
 

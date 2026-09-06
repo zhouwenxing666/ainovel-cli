@@ -72,7 +72,7 @@ type DispatchOp struct {
 
 // workerNames 是合法派单目标(与 agents.BuildWorkers 注册的一致)。有序切片:
 // 同时充当 schema enum(顺序确定保 fingerprint 稳定)与校验白名单。
-var workerNames = []string{"architect_long", "architect_short", "writer", "reviewer", "editor"}
+var workerNames = []string{"architect_long", "architect_short", "writer", "editor"}
 
 func (d *DispatchOp) validate() error {
 	if d == nil {

@@ -51,7 +51,6 @@ func TestRoute_PhaseComplete(t *testing.T) {
 
 func TestRoute_WritingCoverMigrationPreemptsAllWritingWork(t *testing.T) {
 	p := writingProgress([]int{1, 2}, domain.FlowRewriting)
-	p.PendingReviewChapter = 2
 	p.PendingRewrites = []int{1}
 	got := Route(State{
 		Progress:          p,
@@ -59,7 +58,7 @@ func TestRoute_WritingCoverMigrationPreemptsAllWritingWork(t *testing.T) {
 		PlanningTier:      domain.PlanningTierShort,
 	})
 	if got == nil || got.Agent != "architect_short" || got.Chapter != 0 {
-		t.Fatalf("cover migration must dispatch short architect before reviewer/rewrites, got %+v", got)
+		t.Fatalf("cover migration must dispatch short architect before rewrites, got %+v", got)
 	}
 	for _, want := range []string{"旧书封面提示词迁移", "save_foundation(type=cover_prompt)", "不得修改", "不在本轮续写正文"} {
 		if !strings.Contains(got.Task, want) {
@@ -165,24 +164,6 @@ func TestRoute_PendingRewritesFirst(t *testing.T) {
 	}
 	if got.Chapter != 3 {
 		t.Errorf("expected Chapter=3, got %d", got.Chapter)
-	}
-}
-
-func TestRoute_ReviewerRunsBeforeRewriteAndEditor(t *testing.T) {
-	p := writingProgress([]int{1, 2}, domain.FlowRewriting)
-	p.PendingReviewChapter = 2
-	p.PendingRewrites = []int{1}
-	got := Route(State{
-		Progress: p, LastCompleted: 2,
-		ArcBoundary: &storepkg.ArcBoundary{IsArcEnd: true, Volume: 1, Arc: 1},
-	})
-	if got == nil || got.Agent != "reviewer" || got.Chapter != 2 {
-		t.Fatalf("Reviewer 应优先于返工队列和弧末 Editor，got %+v", got)
-	}
-	for _, want := range []string{"Humanizer", "情绪优化", "finalize_reviewed_chapter"} {
-		if !strings.Contains(got.Task, want) {
-			t.Errorf("Reviewer 任务缺少 %q: %s", want, got.Task)
-		}
 	}
 }
 

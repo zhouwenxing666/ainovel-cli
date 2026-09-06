@@ -30,10 +30,10 @@ func plannerForTier(tier domain.PlanningTier) string {
 
 // Instruction 指示 Engine 下一步直接运行的 Worker 与任务。
 type Instruction struct {
-	Agent   string // architect_long / architect_short / writer / reviewer / editor
+	Agent   string // architect_long / architect_short / writer / editor
 	Task    string // 给子代理的任务描述
 	Reason  string // 路由理由（用于事件、日志与失败裁定）
-	Chapter int    // writer/reviewer 任务涉及的章节号；0 表示不涉及（editor/architect 任务）
+	Chapter int    // writer 任务涉及的章节号（续写/重写/打磨）；0 表示不涉及（editor/architect 任务）
 }
 
 // State 是 Route 的输入：所有事实必须在此显式声明，禁止 Route 内部读 Store。
@@ -70,21 +70,20 @@ type State struct {
 //  1. Phase=Complete        → nil（Host 确定性输出总结）
 //  2. 规划期设定缺项且规划师可判定 → 同一规划师补齐；否则 nil（Engine 启动补裁）
 //  3. Writing 旧书缺封面     → architect(迁移 cover_prompt，完成前不续写)
-//  4. PendingReviewChapter  → reviewer(去 AI 味后做情绪优化)
-//  5. PendingRewrites 非空  → writer 按队列重写/打磨
-//  6. Flow=Reviewing        → nil（dormant：当前无写入者，评审期 Flow 实为 writing）
-//  7. Flow=Steering         → nil（用户干预处理中）
-//  8. 弧末评审缺失           → editor(arc review)
-//  9. 弧末评审有但弧摘要缺失  → editor(arc summary)
+//  4. PendingRewrites 非空  → writer 按队列重写/打磨
+//  5. Flow=Reviewing        → nil（dormant：当前无写入者，评审期 Flow 实为 writing）
+//  6. Flow=Steering         → nil（用户干预处理中）
+//  7. 弧末评审缺失           → editor(arc review)
+//  8. 弧末评审有但弧摘要缺失  → editor(arc summary)
 //
-// 10. 卷末弧摘要有但卷摘要缺失 → editor(volume summary)
+// 9. 卷末弧摘要有但卷摘要缺失 → editor(volume summary)
 //
-// 11. 下一弧是骨架           → architect_long(expand_arc)
+// 10. 下一弧是骨架           → architect_long(expand_arc)
 //
-// 12. 卷末需决策下一卷       → architect_long(append_volume / complete_book)
-// 13. 非分层全局审阅到期      → editor(global review)
-// 14. 非分层大纲已耗尽       → architect(决定完结或续接大纲)
-// 15. 其它                  → writer(写 next_chapter)
+// 11. 卷末需决策下一卷       → architect_long(append_volume / complete_book)
+// 12. 非分层全局审阅到期      → editor(global review)
+// 13. 非分层大纲已耗尽       → architect(决定完结或续接大纲)
+// 14. 其它                  → writer(写 next_chapter)
 func Route(s State) *Instruction {
 	p := s.Progress
 	if p == nil {
@@ -115,7 +114,7 @@ func Route(s State) *Instruction {
 	}
 
 	// 3. 旧 writing 项目自动迁移：只在完全没有封面二级标题时触发。
-	// 该分支高于 Reviewer/返工/续写，确保迁移失败时不会绕过并继续写正文；
+	// 该分支高于返工/续写，确保迁移失败时不会绕过并继续写正文；
 	// save_foundation 成功后缺项消失，下一轮自然回到原写作事务。
 	if slices.Contains(s.FoundationMissing, "cover_prompt") {
 		return &Instruction{
@@ -125,20 +124,7 @@ func Route(s State) *Instruction {
 		}
 	}
 
-	// 4. 每次 Writer 提交（含返工）后先交 Reviewer。Reviewer 的内部固定顺序是
-	// Humanizer 检测/去 AI → 情绪优化；无 AI 痕迹时跳过第一步改写。
-	// 它必须早于 PendingRewrites，保证返工队列也逐章完成质量闸后再处理下一章。
-	if p.PendingReviewChapter > 0 {
-		ch := p.PendingReviewChapter
-		return &Instruction{
-			Agent:   "reviewer",
-			Task:    fmt.Sprintf("处理第 %d 章：先按 Humanizer 检测并去除 AI 写作痕迹；若无 AI 痕迹则保持原文不动。随后仅在台词范围内做情绪优化，最后调用 finalize_reviewed_chapter", ch),
-			Reason:  "Writer 已提交章节，Reviewer 质量闸尚未完成",
-			Chapter: ch,
-		}
-	}
-
-	// 5. 重写/打磨队列优先（事实已在工具层落盘，Router 只照单派发）
+	// 4. 重写/打磨队列优先（事实已在工具层落盘，Router 只照单派发）
 	if len(p.PendingRewrites) > 0 {
 		ch := p.PendingRewrites[0]
 		verb := "重写"
@@ -153,7 +139,7 @@ func Route(s State) *Instruction {
 		}
 	}
 
-	// 6. 审阅中 → 交回 LLM。当前为 dormant 分支：save_review 只把 Flow 置为
+	// 5. 审阅中 → 交回 LLM。当前为 dormant 分支：save_review 只把 Flow 置为
 	//    writing/rewriting/polishing，无任何生产路径置 reviewing（评审期 Flow 实为 writing，
 	//    "评审先于续写"由 agentcore steering 优先级保证，不靠此分支）。保留以与 Steering
 	//    对称，并在未来 editor 评审期显式置 reviewing 时使路由让位于 LLM。
@@ -161,12 +147,12 @@ func Route(s State) *Instruction {
 		return nil
 	}
 
-	// 7. 用户干预处理中：Arbiter 正在裁定，Engine 不抢占
+	// 6. 用户干预处理中：Arbiter 正在裁定，Engine 不抢占
 	if p.Flow == domain.FlowSteering {
 		return nil
 	}
 
-	// 8-12. 分层模式的弧末后处理
+	// 7-11. 分层模式的弧末后处理
 	if p.Layered && s.ArcBoundary != nil && s.ArcBoundary.IsArcEnd {
 		b := s.ArcBoundary
 		switch {
@@ -206,7 +192,7 @@ func Route(s State) *Instruction {
 		}
 	}
 
-	// 13. 非分层全局审阅：每 ReviewInterval 章一次(事实:该章的 global review 未落盘)。
+	// 12. 非分层全局审阅：每 ReviewInterval 章一次(事实:该章的 global review 未落盘)。
 	//     原为 commit_chapter 返回值里的 review_required 信号,现按事实推导——
 	//     返回值只是事实的镜像,Route 从 store 直接看同一事实。
 	if !p.Layered && s.LastCompleted > 0 {
@@ -219,7 +205,7 @@ func Route(s State) *Instruction {
 		}
 	}
 
-	// 14. 非分层大纲耗尽时不能继续派发越界章节。让 Architect 基于当前故事事实
+	// 13. 非分层大纲耗尽时不能继续派发越界章节。让 Architect 基于当前故事事实
 	// 决定完结，或用 revise_outline 从 next 章续接计划。
 	next := p.NextChapter()
 	if next <= 0 {
@@ -236,7 +222,7 @@ func Route(s State) *Instruction {
 		}
 	}
 
-	// 15. 正常续写
+	// 14. 正常续写
 	return &Instruction{
 		Agent:   "writer",
 		Task:    fmt.Sprintf("写第 %d 章", next),

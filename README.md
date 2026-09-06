@@ -1,6 +1,6 @@
 # ainovel-cli
 
-全自动 AI 长篇小说创作引擎。确定性引擎跑完整本书，模型在每个需要判断的位置被精确使用：Engine 按事实路由驱动 Architect / Writer / Reviewer / Editor 四个自主创作代理，语义裁定按需唤醒 Arbiter。从一句话需求到完整小说，全程无需人工干预。
+全自动 AI 长篇小说创作引擎。确定性引擎跑完整本书，模型在每个需要判断的位置被精确使用：Engine 按事实路由驱动 Architect / Writer / Editor 三个自主创作代理，语义裁定按需唤醒 Arbiter。从一句话需求到完整小说，全程无需人工干预。
 
 <p align="center">
   <img src="scripts/sample.gif" alt="ainovel-cli demo" width="800">
@@ -9,8 +9,7 @@
 
 ## 特性
 
-- **确定性引擎 + 多智能体协作** — Engine 按事实决策表调度 Architect / Writer / Reviewer / Editor 四个自主创作代理，主循环零 LLM 开销、行为可穷举测试
-- **逐章 Reviewer 质量闸** — 每次 Writer 提交后固定先按 Humanizer 检测并按需去 AI 味，再只在台词范围内优化情绪；无 AI 痕迹时跳过去 AI 改写，且由工具机械阻止台词外改动和超过 5% 的扩写
+- **确定性引擎 + 多智能体协作** — Engine 按事实决策表调度 Architect / Writer / Editor 三个自主创作代理，主循环零 LLM 开销、行为可穷举测试
 - **语义裁定可审计** — 选规划师、干预分诊、失败出路等判断由 Arbiter 单次调用完成，每次裁定落盘可回放。越简单越稳定，拒绝复杂编排
 - **Step 级断点恢复** — 每个工具执行成功后写入 checkpoint，崩溃后精确到 plan/draft/check/commit 步骤级恢复
 - **卷弧双层滚动规划** — 长篇不再一次性规划全部章节。初始只规划前 2 卷弧骨架 + 第 1 弧详细章节，后续弧/卷在写作推进到时再由 Architect 展开，每次展开都参考前文摘要和角色状态，远期规划不空洞
@@ -24,30 +23,30 @@
 
 ## 架构
 
-核心设计：**事实层确定，语义层自主**。可枚举的状态迁移由确定性代码执行（Engine + Route）；边界清晰的判断按需咨询 LLM 函数（Arbiter）；开放式创作交给自主的 LLM 循环（Workers）。一句话概括：一个串行确定性 Engine、四个自主 Worker、少数几个按需 Arbiter 函数、一个文件系统事实层。
+核心设计：**事实层确定，语义层自主**。可枚举的状态迁移由确定性代码执行（Engine + Route）；边界清晰的判断按需咨询 LLM 函数（Arbiter）；开放式创作交给自主的 LLM 循环（Workers）。一句话概括：一个串行确定性 Engine、三个自主 Worker、少数几个按需 Arbiter 函数、一个文件系统事实层。
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                 Host / Engine（确定性）                    │
-│  读 Store → Route → 直接运行 Worker → 循环                │
-│  启动裁定 / 干预分诊 / 失败僵局 → 按需咨询 Arbiter          │
-└────┬──────────┬──────────┬──────────┬─────────────┬──────┘
-     │          │          │          │             │
- ┌───▼────┐ ┌───▼───┐ ┌────▼────┐ ┌───▼────┐  ┌────▼────┐
- │Architect│ │Writer │ │Reviewer │ │ Editor │  │ Arbiter │
- │(LLM循环)│ │(LLM循环)│ │(LLM循环)│ │(LLM循环)│  │(LLM函数)│
- └───┬────┘ └───┬───┘ └────┬────┘ └───┬────┘  └─────────┘
-     └──────────┴───────────┴──────────┘
-                       │ 工具调用（IO + checkpoint）
-┌──────────────────────▼──────────────────────────────────┐
-│                         Store                           │
-│        Progress / Checkpoint / Outline / Drafts / ...   │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│              Host / Engine（确定性）              │
+│  读 Store → Route → 直接运行 Worker → 循环        │
+│  启动裁定 / 干预分诊 / 失败僵局 → 按需咨询 Arbiter  │
+└────┬──────────┬──────────┬─────────────┬────────┘
+     │          │          │             │
+ ┌───▼────┐ ┌───▼───┐ ┌────▼────┐   ┌────▼────┐
+ │Architect│ │Writer │ │ Editor  │   │ Arbiter │
+ │(LLM循环)│ │(LLM循环)│ │(LLM循环)│   │(LLM函数)│
+ └───┬────┘ └───┬───┘ └────┬────┘   └─────────┘
+     └──────────┼──────────┘
+                │ 工具调用（IO + checkpoint）
+┌───────────────▼─────────────────────────────────┐
+│                   Store                         │
+│  Progress / Checkpoint / Outline / Drafts / ... │
+└─────────────────────────────────────────────────┘
 ```
 
 - **Engine** — 每轮从 Store 读事实、按 Route 决策表派发 Worker，执行决定、不参与文学判断；崩溃恢复=读 store 续跑,无会话可恢复
 - **Arbiter** — 按需唤醒的语义裁定（选规划师、用户干预分诊、失败/僵局出路），事实进、结构化决策出，每次裁定落盘可审计可回放
-- **Workers** — Architect / Writer / Reviewer / Editor 各自独立 context 的自主创作循环，通过 Store 中的工件协作
+- **Workers** — Architect / Writer / Editor 各自独立 context 的自主创作循环，通过 Store 中的工件协作
 - **Tools** — 单文件原子 IO + 幂等重放；章节提交使用持久化 Saga + checkpoint，只返事实 JSON，不夹带指令
 
 ### 智能体职责
@@ -57,18 +56,17 @@
 | **Arbiter** | 语义裁定：启动选规划师、用户干预分诊、失败/僵局出路 | 无（单次 LLM 调用，输出结构化决策） |
 | **Architect** | 生成前提、大纲、角色档案、世界规则 | `novel_context` `save_foundation` |
 | **Writer** | 自主完成一章的构思、写作、自审和提交 | `novel_context` `read_chapter` `plan_chapter` `draft_chapter` `check_consistency` `commit_chapter` |
-| **Reviewer** | 每章提交后先检测并按需去 AI 味，再只优化台词情绪 | `novel_context` `read_chapter` `finalize_reviewed_chapter` |
 | **Editor** | 阅读原文，从结构和审美两个层面审阅 | `novel_context` `read_chapter` `save_review` `save_arc_summary` `save_volume_summary` |
 
 ### 写作流程
 
 ```
-用户需求 → Arbiter 选规划师 → Architect 规划 → Writer 写章 → Reviewer 逐章处理 → Editor 弧级评审
-              (裁定落盘)                         ↑              │                    │
-                                                ├── 重写/打磨 ◄─┴────────────────────┘
-                                                │
-                                         Architect 展开下一弧/卷
-                                        （参考前文摘要+角色快照）
+用户需求 → Arbiter 选规划师 → Architect 规划骨架+首弧 → Writer 逐章写作 → Editor 弧级评审
+              (裁定落盘)                                     ↑                   │
+                                                            ├── 重写/打磨 ◄──────┘
+                                                            │
+                                                     Architect 展开下一弧/卷
+                                                    （参考前文摘要+角色快照）
 ```
 
 每一步"下一个派谁"由 Engine 的 Route 决策表按 Store 事实推导（万级组合穷举测试钉死），不消耗任何 LLM 调用。
@@ -82,7 +80,7 @@ Writer 按固定顺序完成每章（写作内容完全自主，工具调用顺�
 5. `check_consistency` — 对照状态数据检查一致性（必须在 draft 之后）
 6. `commit_chapter` — 提交终稿，落盘事实字段（`arc_end` / `next_chapter` / 反馈池等），下一步由 Engine 按 Route 决策表推导
 
-每次 `commit_chapter`（包括返工提交）都会建立 `PendingReviewChapter` 事实。Engine 在派下一章 Writer 或弧末 Editor 前，必须先派 Reviewer：Humanizer 检测/按需改写 → 台词情绪优化 → `finalize_reviewed_chapter`。该工具用来源摘要防止覆盖并发新稿，并机械校验 Humanizer 分支、台词外逐字不变、引号/排版不变和终稿最多增加 5%。外部小说导入复用独立的 import commit 配置，不进入这条 Writer 专属质量闸。
+Writer 提交后，Engine 按现有进度继续写下一章、交给 Editor 审稿，或在逐章验收模式下暂停。
 
 ### 状态迁移规则
 
@@ -351,7 +349,7 @@ output/novel/meta/simulation_profile.json
 /importsim ./profile.json
 ```
 
-`/importsim` 只接受本功能生成的 `simulation_profile.v1` JSON，并按语料指纹合并，重复来源会跳过。只导入可信来源的画像文件；导入内容会成为后续 Agent 的上下文参考。画像会以 compact 形式注入 `novel_context`，Architect、Writer、Reviewer、Editor 都能读取；各 Agent 只借鉴结构、节奏、钩子和吸引读者手法，不复制原文表达或专有设定。
+`/importsim` 只接受本功能生成的 `simulation_profile.v1` JSON，并按语料指纹合并，重复来源会跳过。只导入可信来源的画像文件；导入内容会成为后续 Agent 的上下文参考。画像会以 compact 形式注入 `novel_context`，Architect、Writer、Editor 都能读取；各 Agent 只借鉴结构、节奏、钩子和吸引读者手法，不复制原文表达或专有设定。
 
 ## 导入
 
@@ -429,7 +427,9 @@ output/novel/meta/simulation_profile.json
 }
 ```
 
-可配置的角色：`arbiter` / `architect` / `writer` / `reviewer` / `editor`，以及导入管线的三个语义函数档位 `import_segment` / `import_analyze` / `import_synthesize`（未配置时落到 architect；可把机械性更强的切分指到更便宜的模型省成本）。任何未配置角色都继承顶层 default。
+可配置的角色：`arbiter` / `architect` / `writer` / `editor`，以及导入管线的三个语义函数档位 `import_segment` / `import_analyze` / `import_synthesize`（未配置时落到 architect；可把机械性更强的切分指到更便宜的模型省成本）。任何未配置角色都继承顶层 default。
+
+旧配置中的 `roles.reviewer` 会被忽略。已有书籍若停在旧版逐章润色步骤，启动时会保留已落盘正文并迁移进度，继续正常写作或完成收尾。
 
 #### 使用本机 Codex CLI 登录
 
@@ -467,7 +467,7 @@ macOS 用户可以复用本机 Codex CLI 的 saved login，无需给 ainovel 配
 
 Codex 的结构化输出契约会由 adapter 自动转换为 CLI 接受的 strict JSON Schema；正常使用不需要额外设置 `json_schema`，在 `/config` 中配置 Codex 命令和模型即可。
 
-Codex CLI backend 可用于顶层 default、Arbiter、Architect、Writer、Reviewer、Editor 与正常流程中的单次语义调用；HTTP/Codex 可以混用。Worker fallback 以完整任务为单位：发生业务写入前可以切换 backend，发生写入后则把控制权交回 Engine，由 Engine 重读 Store/Checkpoint 后恢复。Codex 会记录 token、调用和耗时，但 saved-login 调用没有可验证的 API 美元价格，因此不计入 API 美元预算。
+Codex CLI backend 可用于顶层 default、Arbiter、Architect、Writer、Editor 与正常流程中的单次语义调用；HTTP/Codex 可以混用。Worker fallback 以完整任务为单位：发生业务写入前可以切换 backend，发生写入后则把控制权交回 Engine，由 Engine 重读 Store/Checkpoint 后恢复。Codex 会记录 token、调用和耗时，但 saved-login 调用没有可验证的 API 美元价格，因此不计入 API 美元预算。
 
 该 backend 仅支持 macOS 本机运行，不支持 Windows、Linux 或 Docker。`codex-proxy` 一节描述的是带 API Key 的 HTTP 代理指纹配置，与本地 `codex_cli` 不是一回事。完整安全与实现约束见 [Codex CLI Backend](docs/codex-cli-backend.md)。
 
@@ -580,7 +580,7 @@ Codex CLI backend 可用于顶层 default、Arbiter、Architect、Writer、Revie
 
 ### 去 AI 味与自定义规则
 
-内置一份去 AI 味基线（出厂默认）：机械黑名单（套句 / 疲劳词，代码内置 `rules.SystemDefaults()`，commit 时确定性检查）+ 语义判据 `assets/references/anti-ai-tone.md`（注入 writer / editor 规避与举证）+ 逐章 Reviewer 的 Humanizer 检测/按需改写。Reviewer 的第二步采用优化后的 `情绪优化prompt.txt` 原则，只动台词，并带防 AI 回归约束。
+内置一份去 AI 味基线（出厂默认）：机械黑名单（套句 / 疲劳词，代码内置 `rules.SystemDefaults()`，commit 时确定性检查）+ 语义判据 `assets/references/anti-ai-tone.md`（注入 writer / editor 规避与举证）。
 
 想叠加自己的偏好**无需改源码**：在 `~/.ainovel/rules/` 目录（全局，放任意 `.md`，按文件名字典序合并）或 `./.ainovel/rules/` 目录（本书，同样放任意 `.md`，与全局同形态）里，**用大白话写偏好即可**（如「主角别写成圣母」「多用身体感知」「每章 3000 字左右」「不要出现『某种程度上』」）——零格式、零 YAML。系统会用模型把这些自然语言要求归一化成本书规则快照（字数范围 / 禁用词 / 疲劳词阈值等结构化约束 + 风格偏好），写作时自动遵循、提交时自动机械自检；常见 AI 套句与疲劳词的机械基线已内置，不写也能用，就近覆盖、与内置基线叠加生效。
 

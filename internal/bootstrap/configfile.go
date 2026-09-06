@@ -132,6 +132,8 @@ func loadJSONFile(path string) (Config, error) {
 	if err := json.Unmarshal(cleaned, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// 兼容旧配置，移除已停用角色，避免后续预检或保存时继续使用。
+	delete(cfg.Roles, "reviewer")
 	return cfg, nil
 }
 

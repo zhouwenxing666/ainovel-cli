@@ -51,7 +51,7 @@ const subagentMaxRetries = 7
 type UsageRecorder func(agentName, task string, msg agentcore.AgentMessage)
 
 // ApplyThinking 把某具体角色的推理强度应用到 Worker（运行时 /model 调整用）。
-// architect → 两个 architect_* 子代理；writer/reviewer/editor → 对应子代理。
+// architect → 两个 architect_* 子代理；writer/editor → 对应子代理。
 // 空 level = 沿用模型/provider 默认。其它 role 名忽略。
 type ApplyThinking func(role string, level agentcore.ThinkingLevel)
 
@@ -100,11 +100,11 @@ func resolvedRoleThinking(model agentcore.ChatModel, cfg bootstrap.Config, role 
 	return resolved
 }
 
-// BuildWorkers 组装四类 Worker(architect_short/long、writer、reviewer、editor)为可程序化
+// BuildWorkers 组装三类 Worker(architect_short/long、writer、editor)为可程序化
 // 调用的 subagent.Runner。Engine 直接调用其类型化入口，无 LLM 工具层
 // (docs/engine-rfc.md §1)。
 // 返回 Runner、WriterRestorePack 与 ApplyThinking(运行时 /model 联动各角色推理强度;
-// writer/architect/reviewer/editor 的 ContextManager 走工厂自动重建)。
+// writer/architect/editor 的 ContextManager 走工厂自动重建)。
 // onGuardBlock 可选(nil 安全):各 Worker StopGuard 的拦截/升级审计回调。
 func BuildWorkers(
 	cfg bootstrap.Config,
@@ -134,11 +134,6 @@ func BuildWorkers(
 		tools.NewCheckConsistencyTool(store),
 		tools.NewCommitChapterTool(store, styleStats),
 	}
-	reviewerTools := []agentcore.Tool{
-		contextTool,
-		readChapter,
-		tools.NewFinalizeReviewedChapterTool(store, styleStats),
-	}
 	editorTools := []agentcore.Tool{
 		contextTool,
 		readChapter,
@@ -152,7 +147,6 @@ func BuildWorkers(
 	// runtimes and could repeat tools after side effects.
 	architectModel := models.ForRole("architect")
 	writerModel := models.ForRole("writer")
-	reviewerModel := models.ForRole("reviewer")
 	editorModel := models.ForRole("editor")
 
 	// Writer 的 ContextManager 由工厂每次调用重建，窗口随模型 swap 动态跟随（见下方工厂）。
@@ -271,24 +265,6 @@ func BuildWorkers(
 		},
 	}
 
-	reviewer := subagent.Config{
-		Name:             "reviewer",
-		Description:      "章节润色师：先按 Humanizer 去除 AI 写作痕迹，再只对台词做情绪优化",
-		Model:            reviewerModel,
-		SystemPrompt:     bundle.Prompts.Reviewer,
-		Tools:            reviewerTools,
-		MaxTurns:         12,
-		MaxRetries:       subagentMaxRetries,
-		ThinkingLevel:    resolvedRoleThinking(reviewerModel, cfg, "reviewer"),
-		StopAfterTools:   []string{"finalize_reviewed_chapter"},
-		OnMessage:        onMsg,
-		CacheLastMessage: "ephemeral",
-		PromptCacheKey:   cacheBase + "-reviewer",
-		StopGuardFactory: func(_, _ string) agentcore.StopGuard {
-			return guard.NewReviewerStopGuard(store, onGuardBlock)
-		},
-	}
-
 	editor := subagent.Config{
 		Name:             "editor",
 		Description:      "审阅者：阅读原文，从结构和审美两个层面发现问题",
@@ -312,7 +288,7 @@ func BuildWorkers(
 		},
 	}
 
-	httpRunner := subagent.NewRunner(architectShort, architectLong, writer, reviewer, editor)
+	httpRunner := subagent.NewRunner(architectShort, architectLong, writer, editor)
 
 	// 运行时联动各角色推理强度（/model 调整用）。
 	applyThinking := func(role string, level agentcore.ThinkingLevel) {
@@ -321,7 +297,7 @@ func BuildWorkers(
 			level, _ = ResolveThinkingForModel(models.ForRole("architect"), level)
 			httpRunner.SetThinkingLevel("architect_short", level)
 			httpRunner.SetThinkingLevel("architect_long", level)
-		case "writer", "reviewer", "editor":
+		case "writer", "editor":
 			level, _ = ResolveThinkingForModel(models.ForRole(role), level)
 			httpRunner.SetThinkingLevel(role, level)
 		}
@@ -331,7 +307,6 @@ func BuildWorkers(
 		workerDefinition("architect", "Complete only after audit_foundation returns foundation_ready=true.", architectShort),
 		workerDefinition("architect", "Complete only after the configured foundation/arc terminal condition succeeds.", architectLong),
 		workerDefinition("writer", "Complete only after commit_chapter succeeds.", writer),
-		workerDefinition("reviewer", "Complete only after finalize_reviewed_chapter succeeds.", reviewer),
 		workerDefinition("editor", "Complete only after save_review, save_arc_summary, or save_volume_summary succeeds.", editor),
 	})
 

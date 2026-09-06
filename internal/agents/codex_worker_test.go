@@ -380,7 +380,6 @@ func TestHybridWorkerRunnerRoutesEveryCreativeRoleThroughCodexBackend(t *testing
 		{name: "architect_short", role: "architect"},
 		{name: "architect_long", role: "architect"},
 		{name: "writer", role: "writer"},
-		{name: "reviewer", role: "reviewer"},
 		{name: "editor", role: "editor"},
 	}
 	definitions := make([]WorkerDefinition, 0, len(agents))
@@ -449,7 +448,6 @@ func TestHybridWorkerRunnerFakeCLIProcessE2E(t *testing.T) {
 		{name: "architect_short", role: "architect"},
 		{name: "architect_long", role: "architect"},
 		{name: "writer", role: "writer"},
-		{name: "reviewer", role: "reviewer"},
 		{name: "editor", role: "editor"},
 	}
 	definitions := make([]WorkerDefinition, 0, len(agents))

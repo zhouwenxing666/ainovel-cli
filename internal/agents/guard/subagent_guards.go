@@ -128,16 +128,6 @@ func NewWriterStopGuard(st *store.Store, onBlock BlockHook) agentcore.StopGuard 
 	return newCheckpointDeltaGuard(st, "writer", []string{"commit"}, writerBlockMsg, onBlock)
 }
 
-// NewReviewerStopGuard 要求 Reviewer 把 Humanizer + 情绪优化后的终稿落盘。
-// recovered 覆盖“正文 checkpoint 已写、progress 清理前崩溃”的收尾路径。
-func NewReviewerStopGuard(st *store.Store, onBlock BlockHook) agentcore.StopGuard {
-	return newCheckpointDeltaGuard(st, "reviewer",
-		[]string{"chapter_review", "chapter_review_recovered"},
-		staticBlockMsg("你必须调用 finalize_reviewed_chapter 保存本章 Reviewer 终稿后才能结束。只在聊天中输出正文等于丢失。"),
-		onBlock,
-	)
-}
-
 // writerBlockMsg 按本轮已出现的 checkpoint step 判断 writer 卡在哪一步。
 // step 名与各工具落盘值对应：plan / draft / edit / consistency_check / commit。
 func writerBlockMsg(seen map[string]struct{}) string {
